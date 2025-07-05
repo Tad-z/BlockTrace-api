@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 from routes.user import router as user_router
-
+from routes.wallet import router as wallet_router
 
 # Load environment variables
 load_dotenv()
@@ -47,6 +47,7 @@ async def root():
 
 # Include routers
 app.include_router(user_router, tags=["User"], prefix="/user")
+app.include_router(wallet_router, tags=["Wallet"], prefix="/wallet")
 
 if __name__ == "__main__":
     import uvicorn

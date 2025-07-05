@@ -186,7 +186,9 @@ async def remove_wallet(
 
     # If primary wallet was removed and others remain, promote the first
     removed_was_primary = any(
-        w["address"].lower() == address and w["chain"] == body.chain and w.get("is_primary", False)
+        (w["address"].lower() if w["chain"] == "ethereum" else w["address"]) == address
+        and w["chain"] == body.chain
+        and w.get("is_primary", False)
         for w in current_user.get("wallet_addresses", [])
     )
 

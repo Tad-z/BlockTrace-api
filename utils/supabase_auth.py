@@ -1,12 +1,10 @@
-# utils/supabase_auth.py
-import requests
-from jose import jwt
-from jose.exceptions import JWTError, ExpiredSignatureError
 from functools import lru_cache
+import requests
+from jose import jwt, jwk
+from jose.exceptions import JWTError, ExpiredSignatureError
 
-SUPABASE_PROJECT_ID = "<your-project-id>"
-SUPABASE_JWKS_URL = f"https://{SUPABASE_PROJECT_ID}.supabase.co/auth/v1/keys"
-SUPABASE_AUDIENCE = SUPABASE_PROJECT_ID  # Usually same as project ID
+SUPABASE_JWKS_URL = "https://<your-project>.supabase.co/auth/v1/keys"
+SUPABASE_AUDIENCE = "<your-project-id>"  # or 'authenticated' if default
 
 @lru_cache()
 def fetch_supabase_jwks():
@@ -18,9 +16,12 @@ def verify_supabase_token(token: str):
     jwks = fetch_supabase_jwks()
     try:
         unverified_header = jwt.get_unverified_header(token)
-        key = next((k for k in jwks["keys"] if k["kid"] == unverified_header["kid"]), None)
-        if not key:
+        # Find the key in JWKS that matches the 'kid' from the token header
+        key_dict = next((k for k in jwks["keys"] if k["kid"] == unverified_header["kid"]), None)
+        if not key_dict:
             raise JWTError("Public key not found")
+
+        key = jwk.construct(key_dict, unverified_header.get("alg", "RS256"))
 
         payload = jwt.decode(
             token,
@@ -29,8 +30,9 @@ def verify_supabase_token(token: str):
             audience=SUPABASE_AUDIENCE,
             options={"verify_exp": True}
         )
-        return payload  # Contains sub, email, etc.
+        return payload  # Contains fields like `sub`, `email`, etc.
+
     except ExpiredSignatureError:
-        raise ValueError("Token expired")
+        raise JWTError("Token expired")
     except JWTError as e:
-        raise ValueError(f"Invalid token: {str(e)}")
+        raise JWTError(f"Invalid token: {str(e)}")
