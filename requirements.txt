@@ -1,0 +1,17 @@
+python-jose[cryptography]
+requests
+fastapi
+motor
+uvicorn
+python-dotenv
+logging
+pymongo
+passlib
+python-multipart
+bcrypt==4.0.1
+PyJWT
+datetime
+jinja2
+aiosmtplib
+uvicorn[standard]
+packaging
