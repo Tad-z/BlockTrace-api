@@ -15,3 +15,6 @@ jinja2
 aiosmtplib
 uvicorn[standard]
 packaging
+eth-account
+pynacl
+
