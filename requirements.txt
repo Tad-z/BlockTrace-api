@@ -17,4 +17,5 @@ uvicorn[standard]
 packaging
 eth-account
 pynacl
+base58
 
