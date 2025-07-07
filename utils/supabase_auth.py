@@ -1,38 +1,49 @@
 from functools import lru_cache
 import requests
 from jose import jwt, jwk
-from jose.exceptions import JWTError, ExpiredSignatureError
+from jose.exceptions import ExpiredSignatureError, JWTError
+from dotenv import load_dotenv
+import os
 
-SUPABASE_JWKS_URL = "https://<your-project>.supabase.co/auth/v1/keys"
-SUPABASE_AUDIENCE = "<your-project-id>"  # or 'authenticated' if default
+load_dotenv()
 
-@lru_cache()
-def fetch_supabase_jwks():
-    res = requests.get(SUPABASE_JWKS_URL)
-    res.raise_for_status()
-    return res.json()
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://olqqqjqhslvvjjrodxrc.supabase.co")
+# This is the crucial part: Get your JWT_SECRET from Supabase Dashboard
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET") 
+
+SUPABASE_AUDIENCE = "authenticated"
+SUPABASE_ISSUER = f"{SUPABASE_URL}/auth/v1" # This is usually the issuer for Supabase tokens
 
 def verify_supabase_token(token: str):
-    jwks = fetch_supabase_jwks()
+    """Verify Supabase JWT token locally using the JWT Secret."""
+    if not SUPABASE_JWT_SECRET:
+        raise ValueError("SUPABASE_JWT_SECRET environment variable is not set. "
+                         "This is required for backend token verification.")
+
     try:
-        unverified_header = jwt.get_unverified_header(token)
-        # Find the key in JWKS that matches the 'kid' from the token header
-        key_dict = next((k for k in jwks["keys"] if k["kid"] == unverified_header["kid"]), None)
-        if not key_dict:
-            raise JWTError("Public key not found")
-
-        key = jwk.construct(key_dict, unverified_header.get("alg", "RS256"))
-
         payload = jwt.decode(
             token,
-            key,
-            algorithms=["RS256"],
+            SUPABASE_JWT_SECRET, # Use the shared secret directly
+            algorithms=["HS256"], # Supabase uses HS256 for user tokens
             audience=SUPABASE_AUDIENCE,
-            options={"verify_exp": True}
+            issuer=SUPABASE_ISSUER,
+            options={
+                "verify_exp": True,
+                "verify_aud": True,
+                "verify_iss": True,
+                "require_exp": True, # Ensure 'exp' claim is present
+                "require_aud": True, # Ensure 'aud' claim is present
+                "require_iss": True, # Ensure 'iss' claim is present
+            }
         )
-        return payload  # Contains fields like `sub`, `email`, etc.
+        
+        return payload
 
     except ExpiredSignatureError:
         raise JWTError("Token expired")
     except JWTError as e:
+        # Catches general JWT errors, including invalid signature or claims
         raise JWTError(f"Invalid token: {str(e)}")
+    except Exception as e:
+        # Catch any unexpected errors
+        raise JWTError(f"An unexpected error occurred during token verification: {str(e)}")
