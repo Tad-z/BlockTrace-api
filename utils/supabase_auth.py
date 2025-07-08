@@ -36,7 +36,7 @@ def verify_supabase_token(token: str):
                 "require_iss": True, # Ensure 'iss' claim is present
             }
         )
-        
+        print("Token verified successfully:", payload)
         return payload
 
     except ExpiredSignatureError:
