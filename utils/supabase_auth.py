@@ -7,13 +7,11 @@ import os
 
 load_dotenv()
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://olqqqjqhslvvjjrodxrc.supabase.co")
-# This is the crucial part: Get your JWT_SECRET from Supabase Dashboard
+SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET") 
 
 SUPABASE_AUDIENCE = "authenticated"
-SUPABASE_ISSUER = f"{SUPABASE_URL}/auth/v1" # This is usually the issuer for Supabase tokens
-
+SUPABASE_ISSUER = f"{SUPABASE_URL}/auth/v1"
 def verify_supabase_token(token: str):
     """Verify Supabase JWT token locally using the JWT Secret."""
     if not SUPABASE_JWT_SECRET:
@@ -23,17 +21,17 @@ def verify_supabase_token(token: str):
     try:
         payload = jwt.decode(
             token,
-            SUPABASE_JWT_SECRET, # Use the shared secret directly
-            algorithms=["HS256"], # Supabase uses HS256 for user tokens
+            SUPABASE_JWT_SECRET, 
+            algorithms=["HS256"], 
             audience=SUPABASE_AUDIENCE,
             issuer=SUPABASE_ISSUER,
             options={
                 "verify_exp": True,
                 "verify_aud": True,
                 "verify_iss": True,
-                "require_exp": True, # Ensure 'exp' claim is present
-                "require_aud": True, # Ensure 'aud' claim is present
-                "require_iss": True, # Ensure 'iss' claim is present
+                "require_exp": True, 
+                "require_aud": True, 
+                "require_iss": True, 
             }
         )
         print("Token verified successfully:", payload)
@@ -42,8 +40,6 @@ def verify_supabase_token(token: str):
     except ExpiredSignatureError:
         raise JWTError("Token expired")
     except JWTError as e:
-        # Catches general JWT errors, including invalid signature or claims
         raise JWTError(f"Invalid token: {str(e)}")
     except Exception as e:
-        # Catch any unexpected errors
         raise JWTError(f"An unexpected error occurred during token verification: {str(e)}")

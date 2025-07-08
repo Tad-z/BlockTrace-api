@@ -21,7 +21,6 @@ async def get_current_user(request: Request, authorization: str = Header(...)):
 
     user = await db["users"].find_one({"supabase_id": supabase_id})
     if not user:
-        # Optionally auto-create
         user = {
             "supabase_id": supabase_id,
             "email": email,
