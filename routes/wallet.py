@@ -63,6 +63,7 @@ This request will not trigger any blockchain transaction or cost any gas fees.
 """
 
     expires_at = datetime.utcnow() + timedelta(minutes=10)
+    print(f"Creating challenge for {address} on {chain} with nonce {nonce}")
     await db.challenges.insert_one(
         {
             "wallet_address": address,
@@ -84,6 +85,7 @@ async def verify_wallet_signature(
     body: WalletVerifyRequest, request: Request, current_user=Depends(get_current_user)
 ):
     db = get_db(request.app)
+    print("body:", body)
     address = (
         body.wallet_address.lower() if body.chain == "ethereum" else body.wallet_address
     )
