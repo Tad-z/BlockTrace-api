@@ -7,8 +7,11 @@ class WalletChallengeRequest(BaseModel):
     chain: str  # "ethereum" or "solana"
 
 class WalletChallengeResponse(BaseModel):
-    challenge: str
-    expires_in: int
+    challenge: Optional[str] = None
+    expires_in: Optional[int] = 0
+    already_linked: Optional[bool] = False
+    message: str
+
 
 class WalletVerifyRequest(BaseModel):
     wallet_address: str
