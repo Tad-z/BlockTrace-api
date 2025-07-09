@@ -63,18 +63,20 @@ This request will not trigger any blockchain transaction or cost any gas fees.
 """
 
     expires_at = datetime.utcnow() + timedelta(minutes=10)
-    print(f"Creating challenge for {address} on {chain} with nonce {nonce}")
+    challenge_doc = {
+        "wallet_address": address,
+        "chain": chain,
+        "challenge": challenge_message,
+        "nonce": nonce,
+        "used": False,
+        "created_at": datetime.utcnow(),
+        "expires_at": expires_at,
+    }
     await db.challenges.insert_one(
-        {
-            "wallet_address": address,
-            "chain": chain,
-            "challenge": challenge_message,
-            "nonce": nonce,
-            "used": False,
-            "created_at": datetime.utcnow(),
-            "expires_at": expires_at,
-        }
+        challenge_doc
     )
+
+    print("Challenge created:", challenge_doc)
 
     return WalletChallengeResponse(challenge=challenge_message, expires_in=600)
 
@@ -127,6 +129,8 @@ async def verify_wallet_signature(
             "expires_at": {"$gt": datetime.utcnow()},
         }
     )
+
+    print("challenge_doc:", challenge_doc)
 
     if not challenge_doc:
         raise HTTPException(status_code=400, detail="No valid challenge found")
