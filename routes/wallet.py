@@ -80,8 +80,9 @@ async def create_wallet_challenge(
                     "updated_at": datetime.utcnow()
                 }
             },
-            array_filters=[{}]  # applies to all elements in the array
+            array_filters=[{"elem": {}}]  # ✅ correct
         )
+
         
         # Then, set the specific wallet as primary
         await db.users.update_one(
