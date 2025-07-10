@@ -71,7 +71,19 @@ async def create_wallet_challenge(
     })
 
     if has_wallet:
-        # 🔄 Mark this wallet as primary
+        # First, set ALL wallets to not primary
+        await db.users.update_one(
+            {"_id": current_user["_id"]},
+            {
+                "$set": {
+                    "wallet_addresses.$[elem].is_primary": False,
+                    "updated_at": datetime.utcnow()
+                }
+            },
+            array_filters=[{}]  # applies to all elements in the array
+        )
+        
+        # Then, set the specific wallet as primary
         await db.users.update_one(
             {
                 "_id": current_user["_id"],
@@ -86,22 +98,6 @@ async def create_wallet_challenge(
             }
         )
 
-        # ❌ Set all other wallets to not primary
-        await db.users.update_one(
-            {"_id": current_user["_id"]},
-            {
-                "$set": {"updated_at": datetime.utcnow()},
-                "$set": {
-                    "wallet_addresses.$[elem].is_primary": False
-                }
-            },
-            array_filters=[
-                {
-                    "elem.address": {"$ne": address},
-                    "elem.chain": {"$ne": chain}
-                }
-            ]
-        )
 
         print(f"Wallet {address} on chain {chain} already linked. Marked as primary.")
         return WalletChallengeResponse(
