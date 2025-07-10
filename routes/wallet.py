@@ -59,7 +59,7 @@ async def create_wallet_challenge(
     })
 
 
-    # 🔍 Check if wallet is already linked to current user
+   # 🔍 Check if wallet is already linked to current user
     has_wallet = await db.users.find_one({
         "_id": current_user["_id"],
         "wallet_addresses": {
@@ -76,13 +76,11 @@ async def create_wallet_challenge(
             {"_id": current_user["_id"]},
             {
                 "$set": {
-                    "wallet_addresses.$[elem].is_primary": False,
+                    "wallet_addresses.$[].is_primary": False,
                     "updated_at": datetime.utcnow()
                 }
-            },
-            array_filters=[{"elem": {}}]  # ✅ correct
+            }
         )
-
         
         # Then, set the specific wallet as primary
         await db.users.update_one(
