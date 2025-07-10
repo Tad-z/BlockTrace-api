@@ -52,8 +52,6 @@ async def create_wallet_challenge(
     db = get_db(request.app)
     # delete existing challenges for this wallet
     await db.challenges.delete_many({
-        "wallet_address": address,
-        "chain": chain,
         "$or": [
             {"used": True},
             {"expires_at": {"$lt": datetime.utcnow()}}
@@ -105,6 +103,7 @@ async def create_wallet_challenge(
             ]
         )
 
+        print(f"Wallet {address} on chain {chain} already linked. Marked as primary.")
         return WalletChallengeResponse(
             challenge=None,
             expires_in=0,
@@ -140,6 +139,7 @@ This request will not trigger any blockchain transaction or cost any gas fees.
     }
     await db.challenges.insert_one(challenge_doc)
 
+    print(f"Created challenge for wallet {address} on chain {chain}")
     return WalletChallengeResponse(
         challenge=challenge_message,
         expires_in=600,
@@ -230,6 +230,7 @@ async def verify_wallet_signature(
         },
     )
 
+    print(f"Wallet {address} on chain {chain} linked successfully for user {current_user['_id']}")
     return WalletVerifyResponse(success=True, message="Wallet linked successfully.")
 
 
