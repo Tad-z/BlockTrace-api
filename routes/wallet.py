@@ -34,7 +34,7 @@ def is_valid_solana_address(address: str) -> bool:
 async def create_wallet_challenge(
     body: WalletChallengeRequest,
     request: Request,
-    current_user=Depends(get_current_user)
+    current_user=Depends(get_current_user),
 ):
     chain = body.chain
     address = (
@@ -50,52 +50,35 @@ async def create_wallet_challenge(
         raise HTTPException(status_code=400, detail="Invalid Solana address")
 
     db = get_db(request.app)
-    # delete existing challenges for this wallet
-    await db.challenges.delete_many({
-        "$or": [
-            {"used": True},
-            {"expires_at": {"$lt": datetime.utcnow()}}
-        ]
-    })
-
+    # delete existing challenges
+    await db.challenges.delete_many(
+        {"$or": [{"used": True}, {"expires_at": {"$lt": datetime.utcnow()}}]}
+    )
 
    # 🔍 Check if wallet is already linked to current user
-    has_wallet = await db.users.find_one({
-        "_id": current_user["_id"],
-        "wallet_addresses": {
-            "$elemMatch": {
-                "address": address,
-                "chain": chain
-            }
+    has_wallet = await db.users.find_one(
+        {
+            "_id": current_user["_id"],
+            "wallet_addresses": {"$elemMatch": {"address": address, "chain": chain}},
         }
-    })
+    )
 
     if has_wallet:
-        # First, set ALL wallets to not primary
         await db.users.update_one(
             {"_id": current_user["_id"]},
             {
                 "$set": {
-                    "wallet_addresses.$[].is_primary": False,
-                    "updated_at": datetime.utcnow()
+                    "updated_at": datetime.utcnow(),
+                    "wallet_addresses.$[elem].is_primary": False,
+                    "wallet_addresses.$[primaryElem].is_primary": True,
                 }
-            }
-        )
-        
-        # Then, set the specific wallet as primary
-        await db.users.update_one(
-            {
-                "_id": current_user["_id"],
-                "wallet_addresses.address": address,
-                "wallet_addresses.chain": chain
             },
-            {
-                "$set": {
-                    "wallet_addresses.$.is_primary": True,
-                    "updated_at": datetime.utcnow()
-                }
-            }
+            array_filters=[
+                {"elem.address": {"$ne": address}},
+                {"primaryElem.address": address, "primaryElem.chain": chain},
+            ]
         )
+
 
 
         print(f"Wallet {address} on chain {chain} already linked. Marked as primary.")
@@ -103,7 +86,7 @@ async def create_wallet_challenge(
             challenge=None,
             expires_in=0,
             already_linked=True,
-            message="Wallet already linked to your account. Marked as primary."
+            message="Wallet already linked to your account. Marked as primary.",
         )
 
     # 🧾 New wallet → Create challenge
@@ -139,16 +122,13 @@ This request will not trigger any blockchain transaction or cost any gas fees.
         challenge=challenge_message,
         expires_in=600,
         already_linked=False,
-        message="Challenge created"
+        message="Challenge created",
     )
-
 
 
 @router.post("/verify", response_model=WalletVerifyResponse)
 async def verify_wallet_signature(
-    body: WalletVerifyRequest,
-    request: Request,
-    current_user=Depends(get_current_user)
+    body: WalletVerifyRequest, request: Request, current_user=Depends(get_current_user)
 ):
     db = get_db(request.app)
 
@@ -187,8 +167,7 @@ async def verify_wallet_signature(
 
     # ✅ Mark challenge as used
     await db.challenges.update_one(
-        {"_id": challenge_doc["_id"]},
-        {"$set": {"used": True}}
+        {"_id": challenge_doc["_id"]}, {"$set": {"used": True}}
     )
 
     # ❌ Set all other wallets as not primary
@@ -196,16 +175,11 @@ async def verify_wallet_signature(
         {"_id": current_user["_id"]},
         {
             "$set": {"updated_at": datetime.utcnow()},
-            "$set": {
-                "wallet_addresses.$[elem].is_primary": False
-            }
+            "$set": {"wallet_addresses.$[elem].is_primary": False},
         },
         array_filters=[
-            {
-                "elem.address": {"$ne": address},
-                "elem.chain": {"$ne": chain}
-            }
-        ]
+            {"elem.address": {"$ne": address}, "elem.chain": {"$ne": chain}}
+        ],
     )
 
     # ✅ Add new wallet as primary
@@ -225,9 +199,10 @@ async def verify_wallet_signature(
         },
     )
 
-    print(f"Wallet {address} on chain {chain} linked successfully for user {current_user['_id']}")
+    print(
+        f"Wallet {address} on chain {chain} linked successfully for user {current_user['_id']}"
+    )
     return WalletVerifyResponse(success=True, message="Wallet linked successfully.")
-
 
 
 # List wallets
