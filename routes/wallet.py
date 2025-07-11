@@ -41,6 +41,8 @@ async def create_wallet_challenge(
         body.wallet_address.lower() if chain == "ethereum" else body.wallet_address
     )
 
+    email = current_user.get("email")
+
     if chain not in ["ethereum", "solana"]:
         raise HTTPException(status_code=400, detail="Unsupported chain")
 
@@ -81,7 +83,7 @@ async def create_wallet_challenge(
 
 
 
-        print(f"Wallet {address} on chain {chain} already linked. Marked as primary.")
+        print(f"Wallet {address} on chain {chain} for user {email} already linked. Marked as primary.")
         return WalletChallengeResponse(
             challenge=None,
             expires_in=0,
@@ -117,7 +119,7 @@ This request will not trigger any blockchain transaction or cost any gas fees.
     }
     await db.challenges.insert_one(challenge_doc)
 
-    print(f"Created challenge for wallet {address} on chain {chain}")
+    print(f"Created challenge for wallet {address} on chain {chain} for user {email}")
     return WalletChallengeResponse(
         challenge=challenge_message,
         expires_in=600,
@@ -136,6 +138,7 @@ async def verify_wallet_signature(
         body.wallet_address.lower() if body.chain == "ethereum" else body.wallet_address
     )
     chain = body.chain
+    email = current_user.get("email")
 
     # 🔎 Get valid challenge for this wallet
     challenge_doc = await db.challenges.find_one(
@@ -200,7 +203,7 @@ async def verify_wallet_signature(
     )
 
     print(
-        f"Wallet {address} on chain {chain} linked successfully for user {current_user['_id']}"
+        f"Wallet {address} on chain {chain} for user {email} linked successfully for user {current_user['_id']}"
     )
     return WalletVerifyResponse(success=True, message="Wallet linked successfully.")
 
