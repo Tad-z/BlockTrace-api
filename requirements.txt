@@ -18,4 +18,5 @@ packaging
 eth-account
 pynacl
 base58
+solana
 
