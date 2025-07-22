@@ -476,7 +476,7 @@ def get_token_price_usd(symbol: str) -> float:
 
 
 # Example usage for your endpoint
-def analyze_wallet_endpoint(wallet_address: str, transaction_limit: int = 5):
+def analyze_solana_wallet_endpoint(wallet_address: str, transaction_limit: int = 5):
     """
     This is the main function you'd call from your FastAPI/Flask endpoint
     """
