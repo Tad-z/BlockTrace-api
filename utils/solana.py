@@ -463,6 +463,7 @@ def get_token_price_usd(symbol: str) -> float:
 
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={coingecko_id}&vs_currencies=usd"
         response = requests.get(url)
+        print("herre", symbol)
         response.raise_for_status()
         data = response.json()
         price = data.get(coingecko_id, {}).get("usd", 0)
