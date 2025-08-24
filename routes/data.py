@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, model_validator
 from typing import Optional, Literal
 from datetime import datetime, timedelta
 from routes.wallet import is_valid_solana_address, is_valid_ethereum_address
-from utils.solana import analyze_solana_wallet_endpoint, fetch_solana_wallet_data
+from utils.solana import analyze_solana_wallet_endpoint, analyze_solana_wallet_endpoint2
 
 router = APIRouter()
 
@@ -46,6 +46,9 @@ async def fetch_wallet_data(
         address = body.wallet_address.strip()
         chain = body.chain
 
+    userId = current_user.get("user_id")
+    tier = current_user.get("subscription_tier", "free")
+
     # Validate chain + address
     if chain == "ethereum":
         if not is_valid_ethereum_address(address):
@@ -55,7 +58,7 @@ async def fetch_wallet_data(
     elif chain == "solana":
         if not is_valid_solana_address(address):
             raise HTTPException(status_code=400, detail="Invalid Solana address")
-        data = analyze_solana_wallet_endpoint(address)
+        data = analyze_solana_wallet_endpoint(userId, chain, address, tier)
         return data
 
     else:
@@ -63,10 +66,10 @@ async def fetch_wallet_data(
     
 @router.get("/simple")
 def fetch_wallet_data(address: str = Query(...)):
-    address = address.strip()  # ✅ remove leading/trailing whitespace
-
-    data = analyze_solana_wallet_endpoint(address)
+    address = address.strip()
+    data = analyze_solana_wallet_endpoint2(address)
     return data
+
     
 
     

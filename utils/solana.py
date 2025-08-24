@@ -1,12 +1,30 @@
-import os
 import requests
-from dotenv import load_dotenv
-from typing import Dict
-from routes.wallet import is_valid_solana_address
-from fastapi import Request, Depends, Header, HTTPException
 from datetime import datetime, timedelta
+from typing import List, Dict, Optional
+import os
+from models.wallet_query_logs import WalletQueryLogs
+from fastapi import  Request, HTTPException
+from db import get_db
 
-load_dotenv()
+# Subscription tier limits
+SUBSCRIPTION_LIMITS = {
+    "free": {
+        "time_range_days": 7,
+        "daily_address_limit": 5,
+        "max_transactions": 50,
+        "graph_types": ["force_directed"],
+        "graph_depth": 1,
+        "export_enabled": False
+    },
+    "pro": {
+        "time_range_days": 180,  # 6 months
+        "daily_address_limit": 50,
+        "max_transactions": 500,
+        "graph_types": ["force_directed", "flow", "timeline", "sankey"],
+        "graph_depth": 3,
+        "export_enabled": True
+    }
+}
 
 ALCHEMY_URL = os.getenv("ALCHEMY_SOLANA_URL")
 
@@ -22,49 +40,20 @@ SPL_TOKENS = {
     "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv": {"symbol": "PENGU", "name": "Pudgy Penguins"}
 }
 
+# Cache to store already fetched prices
+_token_price_cache: Dict[str, float] = {}
 
-def fetch_solana_wallet_data(address):
-    address = address.strip()
-    valid = is_valid_solana_address(address)
+def get_subscription_limits(tier: str) -> Dict:
+    """Get limits based on subscription tier"""
+    return SUBSCRIPTION_LIMITS.get(tier.lower(), SUBSCRIPTION_LIMITS["free"])
 
-    if not valid:
-        raise HTTPException(status_code=400, detail="Invalid Solana address")
+def calculate_time_range(tier: str) -> Optional[datetime]:
+    """Calculate the earliest timestamp allowed based on tier"""
+    limits = get_subscription_limits(tier)
+    days_back = limits["time_range_days"]
     
-    balance = get_solana_balance(address)
-    transactions = get_solana_transactions(address)
-
-    return {
-        "wallet": address,
-        "balanceSOL": balance,
-        "recentTransactions": transactions
-    }
-
-# def get_solana_balance(address: str) -> float:
-#     payload = {
-#         "jsonrpc": "2.0",
-#         "id": 1,
-#         "method": "getBalance",
-#         "params": [address]
-#     }
-
-#     response = requests.post(ALCHEMY_URL, json=payload)
-#     getResult = response.json()
-#     result = getResult.get("result", {})
-#     lamports = result.get("value", 0)
-#     return lamports / 1e9  
-
-def get_solana_transactions(address: str):
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getSignaturesForAddress",
-        "params": [address]
-    }
-
-    response = requests.post(ALCHEMY_URL, json=payload)
-    getResult = response.json()
-    result = getResult.get("result", [])
-    return result
+    earliest_time = datetime.now() - timedelta(days=days_back)
+    return earliest_time
 
 def get_solana_balance(address: str) -> float:
     """Get current SOL balance for an address"""
@@ -82,13 +71,12 @@ def get_solana_balance(address: str) -> float:
         raise Exception(f"API Error: {result['error']}")
         
     lamports = result.get("result", {}).get("value", 0)
-    return lamports / 1e9  # convert lamports to SOL
+    return lamports / 1e9
 
 def get_solana_signatures(address: str, limit: int = 100, before: str = None, until: str = None):
     """Get transaction signatures for an address with optional pagination"""
     params = [address, {"limit": limit}]
     
-    # Add pagination and filtering options for time-based queries
     if before:
         params[1]["before"] = before
     if until:
@@ -141,12 +129,10 @@ def parse_transaction_transfers(tx_data, user_address: str):
     if not tx_data or not tx_data.get("transaction"):
         return transfers
         
-    # Get transaction metadata
     meta = tx_data.get("meta", {})
     message = tx_data.get("transaction", {}).get("message", {})
     instructions = message.get("instructions", [])
     
-    # Parse pre and post balances to detect SOL transfers
     pre_balances = meta.get("preBalances", [])
     post_balances = meta.get("postBalances", [])
     account_keys = message.get("accountKeys", [])
@@ -167,10 +153,8 @@ def parse_transaction_transfers(tx_data, user_address: str):
     # Find SOL transfers based on balance changes
     user_balance_change = balance_changes.get(user_address, 0)
     if abs(user_balance_change) > 0:
-        # Find counterparties with opposite balance changes
         for address, change in balance_changes.items():
             if address != user_address and abs(change) > 0:
-                # Check if this could be a transfer counterparty
                 if (user_balance_change > 0 and change < 0) or (user_balance_change < 0 and change > 0):
                     direction = "incoming" if user_balance_change > 0 else "outgoing"
                     source = address if direction == "incoming" else user_address
@@ -179,12 +163,12 @@ def parse_transaction_transfers(tx_data, user_address: str):
                     transfers.append({
                         "source": source,
                         "destination": destination,
-                        "amount": abs(change) / 1e9,  # Convert lamports to SOL
+                        "amount": abs(change) / 1e9,
                         "direction": direction,
                         "token": "SOL",
                         "token_address": None
                     })
-                    break  # Only take the first valid counterparty to avoid duplicates
+                    break
     
     # Parse instruction-level transfers
     for instruction in instructions:
@@ -213,31 +197,25 @@ def parse_transaction_transfers(tx_data, user_address: str):
         elif program == "spl-token" and parsed.get("type") in ["transfer", "transferChecked"]:
             info = parsed.get("info", {})
             
-            # Get source and destination from token accounts
             source_owner = info.get("authority") or info.get("source")
             dest_owner = info.get("destination")
             
-            # For transferChecked, we have more detailed info
             if parsed.get("type") == "transferChecked":
                 token_amount = info.get("tokenAmount", {})
                 amount = float(token_amount.get("uiAmount", 0))
                 token_address = info.get("mint")
                 decimals = token_amount.get("decimals", 0)
             else:
-                # For regular transfer, we need to calculate amount
                 amount = int(info.get("amount", 0))
                 decimals = info.get("decimals", 0)
                 amount = amount / (10 ** decimals) if decimals > 0 else amount
                 token_address = info.get("mint", "UNKNOWN")
             
-            # Determine if user is involved
             if source_owner == user_address or dest_owner == user_address:
                 direction = "outgoing" if source_owner == user_address else "incoming"
             
-                # Lookup symbol from SPL_TOKENS or fallback
                 token_info = SPL_TOKENS.get(token_address)
                 token_symbol = token_info["symbol"] if token_info else "SPL Token"
-
                 
                 transfers.append({
                     "source": source_owner,
@@ -250,19 +228,54 @@ def parse_transaction_transfers(tx_data, user_address: str):
     
     return transfers
 
-def get_solana_transactions_for_graph(address: str, limit: int = 5):
+def filter_transactions_by_time(transactions: List[Dict], earliest_time: datetime) -> List[Dict]:
+    """Filter transactions based on time range allowed by tier"""
+    filtered = []
+    earliest_timestamp = earliest_time.timestamp()
+    print("timestamp", earliest_timestamp)
+    
+    for tx in transactions:
+        if tx.get("timestamp"):
+            tx_time = datetime.fromisoformat(tx["timestamp"].replace('Z', '+00:00'))
+            print("tx time", tx_time.timestamp())
+            if tx_time.timestamp() >= earliest_timestamp:
+                filtered.append(tx)
+    
+    return filtered
+
+def get_solana_transactions_for_graph(address: str, tier: str) -> List[Dict]:
     """
-    Get transaction data formatted for graph visualization
-    Returns all the data needed for frontend graph rendering
+    Get transaction data formatted for graph visualization with tier-based limits
     """
     try:
-        signatures = get_solana_signatures(address, limit)
+        limits = get_subscription_limits(tier)
+        max_transactions = limits["max_transactions"]
+        earliest_time = calculate_time_range(tier)
+        
+        # Get more signatures than limit to account for filtering
+        fetch_limit = min(max_transactions * 2, 1000)  # Get extra in case some are filtered out
+        signatures = get_solana_signatures(address, fetch_limit)
+        
         transactions = []
         seen_transfers = set()
-
+        processed_count = 0
+        
         for sig_obj in signatures:
+            # Stop if we've reached the transaction limit after filtering
+            if len(transactions) >= max_transactions:
+                break
+                
             signature = sig_obj.get("signature")
             block_time = sig_obj.get("blockTime")
+            
+            # Skip if no block time or outside time range
+            if not block_time:
+                continue
+                
+            tx_datetime = datetime.fromtimestamp(block_time)
+            if tx_datetime < earliest_time:
+                continue  # Skip transactions outside time range
+            
             slot = sig_obj.get("slot")
             confirmation_status = sig_obj.get("confirmationStatus", "finalized")
 
@@ -277,7 +290,7 @@ def get_solana_transactions_for_graph(address: str, limit: int = 5):
 
             base_tx_info = {
                 "hash": signature,
-                "timestamp": datetime.fromtimestamp(block_time).isoformat() if block_time else None,
+                "timestamp": tx_datetime.isoformat(),
                 "chain": "Solana",
                 "fee": fee,
                 "status": status,
@@ -298,6 +311,7 @@ def get_solana_transactions_for_graph(address: str, limit: int = 5):
                         continue
                     seen_transfers.add(transfer_key)
 
+                    # Calculate USD equivalent
                     usd_equivalent = 0
                     if transfer["token"] == "SOL":
                         usd_equivalent = transfer["amount"] * get_token_price_usd("SOL")
@@ -307,11 +321,17 @@ def get_solana_transactions_for_graph(address: str, limit: int = 5):
                             symbol = token_info["symbol"]
                             usd_equivalent = transfer["amount"] * get_token_price_usd(symbol)
 
-                    transactions.append({
+                    transaction_data = {
                         **base_tx_info,
                         **transfer,
                         "usd_equivalent": usd_equivalent
-                    })
+                    }
+                    
+                    transactions.append(transaction_data)
+                    
+                    # Check if we've hit the limit
+                    if len(transactions) >= max_transactions:
+                        break
             else:
                 transactions.append({
                     **base_tx_info,
@@ -323,25 +343,27 @@ def get_solana_transactions_for_graph(address: str, limit: int = 5):
                     "token_address": None,
                     "usd_equivalent": 0
                 })
+            
+            processed_count += 1
 
-        return transactions
+        return transactions[:max_transactions]  # Ensure we don't exceed limit
 
     except Exception as e:
         print(f"Error fetching transactions: {e}")
         return []
 
-
-def get_wallet_graph_data(address: str, limit: int = 5):
+def get_wallet_graph_data(address: str, tier: str = "free"):
     """
-    Main function to get all graph data for a wallet address
-    This is what your endpoint should call
+    Main function to get all graph data for a wallet address with tier-based limits
     """
     try:
+        limits = get_subscription_limits(tier)
+        
         # Get balance
         balance = get_solana_balance(address)
         
-        # Get transactions
-        transactions = get_solana_transactions_for_graph(address, limit)
+        # Get transactions with tier limits
+        transactions = get_solana_transactions_for_graph(address, tier)
         
         # Build nodes and edges for graph
         nodes = {}
@@ -393,15 +415,20 @@ def get_wallet_graph_data(address: str, limit: int = 5):
                 "fee": tx["fee"],
                 "status": tx["status"],
                 "chain": tx["chain"],
-                "weight": tx["amount"]  # For graph layout algorithms
+                "weight": tx["amount"]
             }
             
             edges.append(edge)
         
-        # Prepare final response
+        # Calculate summary statistics
+        sol_transactions = [tx for tx in transactions if tx["token"] == "SOL"]
+        
+        # Prepare final response with tier information
         response = {
             "wallet_address": address,
             "balance": balance,
+            "subscription_tier": tier.lower(),
+            "tier_limits": limits,
             "total_transactions": len(transactions),
             "graph_data": {
                 "nodes": list(nodes.values()),
@@ -410,11 +437,17 @@ def get_wallet_graph_data(address: str, limit: int = 5):
             "summary": {
                 "total_incoming": len([tx for tx in transactions if tx["direction"] == "incoming"]),
                 "total_outgoing": len([tx for tx in transactions if tx["direction"] == "outgoing"]),
-                "total_solana_volume": sum([tx["amount"] for tx in transactions if tx["token"] == "SOL"]),
-                "unique_addresses": len(nodes) - 1,  # Exclude main wallet
+                "total_solana_volume": sum([tx["amount"] for tx in sol_transactions]),
+                "unique_addresses": len(nodes) - 1,
                 "date_range": {
                     "earliest": min([tx["timestamp"] for tx in transactions if tx["timestamp"]]) if transactions else None,
-                    "latest": max([tx["timestamp"] for tx in transactions if tx["timestamp"]]) if transactions else None
+                    "latest": max([tx["timestamp"] for tx in transactions if tx["timestamp"]]) if transactions else None,
+                    "allowed_days_back": limits["time_range_days"]
+                },
+                "tokens_found": list(set([tx["token"] for tx in transactions])),
+                "limitations_applied": {
+                    "time_limited": len(transactions) > 0,  # Will be true if any filtering occurred
+                    "transaction_limited": len(transactions) == limits["max_transactions"]
                 }
             }
         }
@@ -425,25 +458,20 @@ def get_wallet_graph_data(address: str, limit: int = 5):
         return {
             "error": str(e),
             "wallet_address": address,
+            "subscription_tier": tier.lower(),
             "graph_data": {"nodes": [], "edges": []},
             "summary": {}
         }
-
-
-# Cache to store already fetched prices
-_token_price_cache: Dict[str, float] = {}
 
 def get_token_price_usd(symbol: str) -> float:
     """
     Fetch USD price for a given token symbol using CoinGecko.
     Uses cache to avoid redundant API calls during the same run.
-    Falls back to 0 if the token is not found or API fails.
     """
     if symbol in _token_price_cache:
         return _token_price_cache[symbol]
 
     try:
-        # CoinGecko uses lowercase ids
         symbol_map = {
             "SOL": "solana",
             "USDC": "usd-coin",
@@ -454,7 +482,7 @@ def get_token_price_usd(symbol: str) -> float:
             "MNDE": "marinade",
             "stSOL": "lido-staked-sol",
             "WSOL": "solana",
-            "PENGU": "penguin"
+            "PENGU": "pudgy-penguins"
         }
 
         coingecko_id = symbol_map.get(symbol)
@@ -463,12 +491,11 @@ def get_token_price_usd(symbol: str) -> float:
 
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={coingecko_id}&vs_currencies=usd"
         response = requests.get(url)
-        print("herre", symbol)
         response.raise_for_status()
         data = response.json()
         price = data.get(coingecko_id, {}).get("usd", 0)
 
-        _token_price_cache[symbol] = price  # Cache the result
+        _token_price_cache[symbol] = price
         return price
 
     except Exception as e:
@@ -476,12 +503,90 @@ def get_token_price_usd(symbol: str) -> float:
         return 0
 
 
-# Example usage for your endpoint
-def analyze_solana_wallet_endpoint(wallet_address: str, transaction_limit: int = 5):
-    """
-    This is the main function you'd call from your FastAPI/Flask endpoint
-    """
+def get_day_bounds():
+    now = datetime.utcnow()
+    start = datetime(now.year, now.month, now.day)
+    end = start + timedelta(days=1)
+    return start, end
+
+
+# Main endpoint function
+async def analyze_solana_wallet_endpoint(request: Request, userId, chain: str, wallet_address: str, tier: str = "free"):
+    db = get_db(request.app)
+
     if not wallet_address:
         return {"error": "Wallet address is required"}
+
+    # Validate tier
+    if tier.lower() not in ["free", "pro"]:
+        return {"error": "Invalid tier. Must be 'free' or 'pro'"}
     
-    return get_wallet_graph_data(wallet_address, transaction_limit)
+    # daily address limits
+    free_daily_limit = SUBSCRIPTION_LIMITS["free"]["daily_address_limit"]
+    pro_daily_limit = SUBSCRIPTION_LIMITS["pro"]["daily_address_limit"]
+
+    # Check rate limit **before** logging
+    if tier.lower() == "free":
+        start, end = get_day_bounds()
+
+        used_addresses = await db["wallet_query_logs"].distinct(
+            "wallet_address",
+            {
+                "userId": userId,
+                "tier": "free",
+                "created_at": {"$gte": start.isoformat(), "$lt": end.isoformat()}
+            }
+        )
+
+        if wallet_address.lower() not in used_addresses and len(used_addresses) >= free_daily_limit:
+            raise HTTPException(status_code=403, detail="Free tier daily limit reached.")
+        
+    if tier.lower() == "pro":
+        start, end = get_day_bounds()
+
+        used_addresses = await db["wallet_query_logs"].distinct(
+            "wallet_address",
+            {
+                "userId": userId,
+                "tier": "pro",
+                "created_at": {"$gte": start.isoformat(), "$lt": end.isoformat()}
+            }
+        )
+
+        if wallet_address.lower() not in used_addresses and len(used_addresses) >= pro_daily_limit:
+            raise HTTPException(status_code=403, detail="Pro tier daily limit reached.")
+        
+    
+        
+
+    # Log query after passing check
+    await db["wallet_query_logs"].insert_one(WalletQueryLogs.from_query(
+        user_id=userId,
+        wallet_address=wallet_address,
+        tier=tier,
+        chain=chain
+    ).dict())
+
+    # Return the graph data
+    response = get_wallet_graph_data(wallet_address, tier)
+
+    if tier.lower() == "free":
+        response["rate_limit_info"] = {
+            "addresses_used_today": len(used_addresses) + (1 if wallet_address.lower() not in used_addresses else 0),
+            "daily_limit": free_daily_limit,
+            "remaining": max(0, 5 - len(used_addresses) - (1 if wallet_address.lower() not in used_addresses else 0))
+        }
+
+    if tier.lower() == "pro":
+        response["rate_limit_info"] = {
+            "addresses_used_today": len(used_addresses) + (1 if wallet_address.lower() not in used_addresses else 0),
+            "daily_limit": pro_daily_limit,
+            "remaining": max(0, 50 - len(used_addresses) - (1 if wallet_address.lower() not in used_addresses else 0))
+        }
+
+    return response
+
+def analyze_solana_wallet_endpoint2(wallet_address: str):
+    if not wallet_address:
+        return {"error": "Wallet address is required"}
+    return get_wallet_graph_data(wallet_address)
