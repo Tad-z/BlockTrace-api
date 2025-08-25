@@ -53,7 +53,7 @@ async def get_current_user(request: Request, authorization: str = Header(...)):
             "updated_at": now,
         }
         res = await db["users"].insert_one(user)
-        user["_id"] = res.inserted_id
+        user["id"] = res.inserted_id
         return user
 
     # 🔄 Auto-migration for legacy users
