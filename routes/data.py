@@ -32,6 +32,7 @@ async def fetch_wallet_data(
     request: Request,
     current_user=Depends(get_current_user)
 ):
+    print(current_user)
     if body.useConnectedWallet:
         wallet_addresses = current_user.get("wallet_addresses", [])
         primary_wallet = next((w for w in wallet_addresses if w.get("is_primary")), None)
