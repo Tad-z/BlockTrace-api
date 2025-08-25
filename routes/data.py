@@ -58,8 +58,9 @@ async def fetch_wallet_data(
     elif chain == "solana":
         if not is_valid_solana_address(address):
             raise HTTPException(status_code=400, detail="Invalid Solana address")
-        data = analyze_solana_wallet_endpoint(userId, chain, address, tier)
+        data = await analyze_solana_wallet_endpoint(request, userId, chain, address, tier)  # ✅ await
         return data
+
 
     else:
         raise HTTPException(status_code=400, detail="Unsupported chain")
