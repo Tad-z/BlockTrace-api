@@ -46,7 +46,7 @@ async def fetch_wallet_data(
         address = body.wallet_address.strip()
         chain = body.chain
 
-    userId = current_user.get("user_id")
+    userId = current_user.get("id")
     tier = current_user.get("subscription_tier", "free")
 
     # Validate chain + address
