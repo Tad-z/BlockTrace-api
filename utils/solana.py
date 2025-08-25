@@ -3,8 +3,13 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import os
 from models.wallet_query_logs import WalletQueryLogs
-from fastapi import  Request, HTTPException
+from fastapi import Request, HTTPException
 from db import get_db
+import asyncio
+import aiohttp
+from concurrent.futures import ThreadPoolExecutor
+import time
+from functools import lru_cache
 
 # Subscription tier limits
 SUBSCRIPTION_LIMITS = {
@@ -40,8 +45,9 @@ SPL_TOKENS = {
     "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv": {"symbol": "PENGU", "name": "Pudgy Penguins"}
 }
 
-# Cache to store already fetched prices
-_token_price_cache: Dict[str, float] = {}
+# Cache to store already fetched prices with TTL
+_token_price_cache: Dict[str, Dict] = {}
+PRICE_CACHE_TTL = 300  # 5 minutes
 
 def get_subscription_limits(tier: str) -> Dict:
     """Get limits based on subscription tier"""
@@ -55,8 +61,8 @@ def calculate_time_range(tier: str) -> Optional[datetime]:
     earliest_time = datetime.now() - timedelta(days=days_back)
     return earliest_time
 
-def get_solana_balance(address: str) -> float:
-    """Get current SOL balance for an address"""
+async def get_solana_balance_async(session: aiohttp.ClientSession, address: str) -> float:
+    """Get current SOL balance for an address asynchronously"""
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -64,17 +70,26 @@ def get_solana_balance(address: str) -> float:
         "params": [address]
     }
     
-    response = requests.post(ALCHEMY_URL, json=payload)
-    result = response.json()
-    
-    if "error" in result:
-        raise Exception(f"API Error: {result['error']}")
-        
-    lamports = result.get("result", {}).get("value", 0)
-    return lamports / 1e9
+    try:
+        async with session.post(ALCHEMY_URL, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            result = await response.json()
+            
+            if "error" in result:
+                raise Exception(f"API Error: {result['error']}")
+                
+            lamports = result.get("result", {}).get("value", 0)
+            return lamports / 1e9
+    except Exception as e:
+        print(f"Error getting balance for {address}: {e}")
+        return 0
 
-def get_solana_signatures(address: str, limit: int = 100, before: str = None, until: str = None):
-    """Get transaction signatures for an address with optional pagination"""
+async def get_solana_balance(address: str) -> float:
+    """Get current SOL balance for an address"""
+    async with aiohttp.ClientSession() as session:
+        return await get_solana_balance_async(session, address)
+
+async def get_solana_signatures_async(session: aiohttp.ClientSession, address: str, limit: int = 100, before: str = None, until: str = None):
+    """Get transaction signatures for an address with optional pagination - async version"""
     params = [address, {"limit": limit}]
     
     if before:
@@ -89,16 +104,20 @@ def get_solana_signatures(address: str, limit: int = 100, before: str = None, un
         "params": params
     }
     
-    response = requests.post(ALCHEMY_URL, json=payload)
-    result = response.json()
-    
-    if "error" in result:
-        raise Exception(f"API Error: {result['error']}")
-        
-    return result.get("result", [])
+    try:
+        async with session.post(ALCHEMY_URL, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as response:
+            result = await response.json()
+            
+            if "error" in result:
+                raise Exception(f"API Error: {result['error']}")
+                
+            return result.get("result", [])
+    except Exception as e:
+        print(f"Error getting signatures: {e}")
+        return []
 
-def get_solana_transaction_details(signature: str):
-    """Get detailed transaction information"""
+async def get_solana_transaction_details_async(session: aiohttp.ClientSession, signature: str):
+    """Get detailed transaction information - async version with better error handling"""
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -113,17 +132,236 @@ def get_solana_transaction_details(signature: str):
         ]
     }
     
-    response = requests.post(ALCHEMY_URL, json=payload)
-    result = response.json()
-    
-    if "error" in result:
-        print(f"Error fetching transaction {signature}: {result['error']}")
+    try:
+        async with session.post(ALCHEMY_URL, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as response:
+            result = await response.json()
+            
+            if "error" in result:
+                error_code = result.get("error", {}).get("code")
+                if error_code == 429:
+                    # Raise specific exception for rate limiting
+                    raise Exception(f"429: Rate limited")
+                else:
+                    print(f"API Error fetching transaction {signature[:16]}: {result['error']}")
+                    return None
+                
+            return result.get("result")
+    except asyncio.TimeoutError:
+        print(f"Timeout fetching transaction {signature[:16]}")
         return None
+    except Exception as e:
+        if "429" in str(e):
+            raise e  # Re-raise rate limit errors for retry handling
+        print(f"Error fetching transaction {signature[:16]}: {e}")
+        return None
+
+async def process_transactions_batch_async(session: aiohttp.ClientSession, signatures: List[Dict], user_address: str, max_transactions: int, earliest_time: datetime):
+    """Process transactions in batches asynchronously with rate limiting and retry logic"""
+    transactions = []
+    seen_transfers = set()
+    
+    # Create semaphore to limit concurrent requests - reduced to avoid rate limits
+    semaphore = asyncio.Semaphore(3)  # Much lower limit for Alchemy
+    
+    async def process_single_transaction_with_retry(sig_obj, max_retries=3):
+        async with semaphore:
+            signature = sig_obj.get("signature")
+            block_time = sig_obj.get("blockTime")
+            
+            # Skip if no block time or outside time range
+            if not block_time:
+                return None
+                
+            tx_datetime = datetime.fromtimestamp(block_time)
+            if tx_datetime < earliest_time:
+                return None
+                
+            slot = sig_obj.get("slot")
+            confirmation_status = sig_obj.get("confirmationStatus", "finalized")
+
+            # Retry logic for rate-limited requests
+            for attempt in range(max_retries):
+                try:
+                    tx_data = await get_solana_transaction_details_async(session, signature)
+                    if tx_data:
+                        break
+                    elif attempt < max_retries - 1:
+                        # Wait longer on each retry
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    else:
+                        return None
+                except Exception as e:
+                    if "429" in str(e) and attempt < max_retries - 1:
+                        # Exponential backoff for rate limits
+                        wait_time = (2 ** attempt) + (attempt * 0.5)
+                        print(f"Rate limited, retrying in {wait_time}s for {signature[:16]}...")
+                        await asyncio.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"Failed to fetch transaction {signature[:16]} after {attempt + 1} attempts")
+                        return None
+
+            if not tx_data:
+                return None
+
+            transfers = parse_transaction_transfers(tx_data, user_address)
+            meta = tx_data.get("meta", {})
+            fee = meta.get("fee", 0) / 1e9
+            status = "success" if meta.get("err") is None else "failed"
+
+            base_tx_info = {
+                "hash": signature,
+                "timestamp": tx_datetime.isoformat(),
+                "chain": "Solana",
+                "fee": fee,
+                "status": status,
+                "slot": slot,
+                "confirmation_status": confirmation_status
+            }
+
+            processed_transfers = []
+            
+            if transfers:
+                for transfer in transfers:
+                    transfer_key = (
+                        signature,
+                        transfer["source"],
+                        transfer["destination"],
+                        transfer["amount"],
+                        transfer["token"]
+                    )
+                    
+                    # Use thread-safe approach for seen_transfers check
+                    if transfer_key not in seen_transfers:
+                        seen_transfers.add(transfer_key)
+                        
+                        # Calculate USD equivalent (using cached prices)
+                        usd_equivalent = 0
+                        if transfer["token"] == "SOL":
+                            usd_equivalent = transfer["amount"] * get_cached_token_price("SOL")
+                        else:
+                            token_info = SPL_TOKENS.get(transfer["token_address"])
+                            if token_info:
+                                symbol = token_info["symbol"]
+                                usd_equivalent = transfer["amount"] * get_cached_token_price(symbol)
+
+                        transaction_data = {
+                            **base_tx_info,
+                            **transfer,
+                            "usd_equivalent": usd_equivalent
+                        }
+                        
+                        processed_transfers.append(transaction_data)
+            else:
+                processed_transfers.append({
+                    **base_tx_info,
+                    "source": user_address,
+                    "destination": "System Program",
+                    "amount": 0,
+                    "direction": "interaction",
+                    "token": "SOL",
+                    "token_address": None,
+                    "usd_equivalent": 0
+                })
+            
+            return processed_transfers
+    
+    # Process transactions in smaller batches with longer delays
+    batch_size = 5  # Much smaller batches to avoid rate limits
+    processed_count = 0
+    
+    for i in range(0, len(signatures), batch_size):
+        if len(transactions) >= max_transactions:
+            break
+            
+        batch = signatures[i:i + batch_size]
         
-    return result.get("result")
+        # Process batch concurrently
+        tasks = [process_single_transaction_with_retry(sig_obj) for sig_obj in batch]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, Exception):
+                print(f"Error processing transaction: {result}")
+                continue
+                
+            if result:
+                for tx in result:
+                    if tx:
+                        transactions.append(tx)
+                        if len(transactions) >= max_transactions:
+                            return transactions[:max_transactions]
+        
+        processed_count += len(batch)
+        print(f"Processed batch {i//batch_size + 1}, total transactions so far: {len(transactions)}")
+        
+        # Longer delay between batches to respect rate limits
+        if i + batch_size < len(signatures):
+            await asyncio.sleep(0.5)  # Increased delay
+        
+        # Stop if we have enough transactions
+        if len(transactions) >= max_transactions:
+            break
+    
+    print(f"Final transaction count: {len(transactions)} out of {max_transactions} requested")
+    return transactions[:max_transactions]
+
+@lru_cache(maxsize=100)
+def get_cached_token_price(symbol: str) -> float:
+    """
+    Get cached token price with TTL
+    """
+    current_time = time.time()
+    
+    if symbol in _token_price_cache:
+        cache_entry = _token_price_cache[symbol]
+        if current_time - cache_entry['timestamp'] < PRICE_CACHE_TTL:
+            return cache_entry['price']
+    
+    # Fetch new price
+    price = get_token_price_usd_sync(symbol)
+    _token_price_cache[symbol] = {
+        'price': price,
+        'timestamp': current_time
+    }
+    
+    return price
+
+def get_token_price_usd_sync(symbol: str) -> float:
+    """
+    Synchronous version of price fetching for caching
+    """
+    try:
+        symbol_map = {
+            "SOL": "solana",
+            "USDC": "usd-coin", 
+            "USDT": "tether",
+            "BONK": "bonk",
+            "JUP": "jupiter",
+            "RAY": "raydium", 
+            "MNDE": "marinade",
+            "stSOL": "lido-staked-sol",
+            "WSOL": "solana",
+            "PENGU": "pudgy-penguins"
+        }
+
+        coingecko_id = symbol_map.get(symbol)
+        if not coingecko_id:
+            return 0
+
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coingecko_id}&vs_currencies=usd"
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        return data.get(coingecko_id, {}).get("usd", 0)
+
+    except Exception as e:
+        print(f"Price fetch failed for {symbol}: {e}")
+        return 0
 
 def parse_transaction_transfers(tx_data, user_address: str):
-    """Parse transaction data to extract all transfer information"""
+    """Parse transaction data to extract all transfer information - optimized version"""
     transfers = []
     
     if not tx_data or not tx_data.get("transaction"):
@@ -170,7 +408,7 @@ def parse_transaction_transfers(tx_data, user_address: str):
                     })
                     break
     
-    # Parse instruction-level transfers
+    # Parse instruction-level transfers (optimized)
     for instruction in instructions:
         parsed = instruction.get("parsed", {})
         program = instruction.get("program")
@@ -204,7 +442,6 @@ def parse_transaction_transfers(tx_data, user_address: str):
                 token_amount = info.get("tokenAmount", {})
                 amount = float(token_amount.get("uiAmount", 0))
                 token_address = info.get("mint")
-                decimals = token_amount.get("decimals", 0)
             else:
                 amount = int(info.get("amount", 0))
                 decimals = info.get("decimals", 0)
@@ -228,181 +465,122 @@ def parse_transaction_transfers(tx_data, user_address: str):
     
     return transfers
 
-def filter_transactions_by_time(transactions: List[Dict], earliest_time: datetime) -> List[Dict]:
-    """Filter transactions based on time range allowed by tier"""
-    filtered = []
-    earliest_timestamp = earliest_time.timestamp()
-    print("timestamp", earliest_timestamp)
-    
-    for tx in transactions:
-        if tx.get("timestamp"):
-            tx_time = datetime.fromisoformat(tx["timestamp"].replace('Z', '+00:00'))
-            print("tx time", tx_time.timestamp())
-            if tx_time.timestamp() >= earliest_timestamp:
-                filtered.append(tx)
-    
-    return filtered
-
-def get_solana_transactions_for_graph(address: str, tier: str) -> List[Dict]:
+async def get_solana_transactions_for_graph_async(address: str, tier: str) -> List[Dict]:
     """
-    Get transaction data formatted for graph visualization with tier-based limits
+    Async version of transaction fetching with optimizations
     """
     try:
         limits = get_subscription_limits(tier)
         max_transactions = limits["max_transactions"]
         earliest_time = calculate_time_range(tier)
         
-        # Get more signatures than limit to account for filtering
-        fetch_limit = min(max_transactions * 2, 1000)  # Get extra in case some are filtered out
-        signatures = get_solana_signatures(address, fetch_limit)
-        
-        transactions = []
-        seen_transfers = set()
-        processed_count = 0
-        
-        for sig_obj in signatures:
-            # Stop if we've reached the transaction limit after filtering
-            if len(transactions) >= max_transactions:
-                break
-                
-            signature = sig_obj.get("signature")
-            block_time = sig_obj.get("blockTime")
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(limit=20),
+            timeout=aiohttp.ClientTimeout(total=60)
+        ) as session:
             
-            # Skip if no block time or outside time range
-            if not block_time:
-                continue
-                
-            tx_datetime = datetime.fromtimestamp(block_time)
-            if tx_datetime < earliest_time:
-                continue  # Skip transactions outside time range
+            # Get signatures first
+            fetch_limit = min(max_transactions * 2, 1000)
+            signatures = await get_solana_signatures_async(session, address, fetch_limit)
             
-            slot = sig_obj.get("slot")
-            confirmation_status = sig_obj.get("confirmationStatus", "finalized")
-
-            tx_data = get_solana_transaction_details(signature)
-            if not tx_data:
-                continue
-
-            transfers = parse_transaction_transfers(tx_data, address)
-            meta = tx_data.get("meta", {})
-            fee = meta.get("fee", 0) / 1e9
-            status = "success" if meta.get("err") is None else "failed"
-
-            base_tx_info = {
-                "hash": signature,
-                "timestamp": tx_datetime.isoformat(),
-                "chain": "Solana",
-                "fee": fee,
-                "status": status,
-                "slot": slot,
-                "confirmation_status": confirmation_status
-            }
-
-            if transfers:
-                for transfer in transfers:
-                    transfer_key = (
-                        signature,
-                        transfer["source"],
-                        transfer["destination"],
-                        transfer["amount"],
-                        transfer["token"]
-                    )
-                    if transfer_key in seen_transfers:
-                        continue
-                    seen_transfers.add(transfer_key)
-
-                    # Calculate USD equivalent
-                    usd_equivalent = 0
-                    if transfer["token"] == "SOL":
-                        usd_equivalent = transfer["amount"] * get_token_price_usd("SOL")
-                    else:
-                        token_info = SPL_TOKENS.get(transfer["token_address"])
-                        if token_info:
-                            symbol = token_info["symbol"]
-                            usd_equivalent = transfer["amount"] * get_token_price_usd(symbol)
-
-                    transaction_data = {
-                        **base_tx_info,
-                        **transfer,
-                        "usd_equivalent": usd_equivalent
-                    }
-                    
-                    transactions.append(transaction_data)
-                    
-                    # Check if we've hit the limit
-                    if len(transactions) >= max_transactions:
-                        break
-            else:
-                transactions.append({
-                    **base_tx_info,
-                    "source": address,
-                    "destination": "System Program",
-                    "amount": 0,
-                    "direction": "interaction",
-                    "token": "SOL",
-                    "token_address": None,
-                    "usd_equivalent": 0
-                })
+            # Filter signatures by time early to avoid unnecessary API calls
+            filtered_signatures = []
+            for sig_obj in signatures:
+                block_time = sig_obj.get("blockTime")
+                if block_time:
+                    tx_datetime = datetime.fromtimestamp(block_time)
+                    if tx_datetime >= earliest_time:
+                        filtered_signatures.append(sig_obj)
+                        
+                # Limit early to avoid processing too many
+                if len(filtered_signatures) >= max_transactions:
+                    break
             
-            processed_count += 1
-
-        return transactions[:max_transactions]  # Ensure we don't exceed limit
+            # Process transactions asynchronously
+            transactions = await process_transactions_batch_async(
+                session, filtered_signatures, address, max_transactions, earliest_time
+            )
+            
+            return transactions
 
     except Exception as e:
         print(f"Error fetching transactions: {e}")
         return []
 
-def get_wallet_graph_data(address: str, tier: str = "free"):
+async def get_solana_transactions_for_graph(address: str, tier: str) -> List[Dict]:
     """
-    Main function to get all graph data for a wallet address with tier-based limits
+    Async version of transaction fetching
+    """
+    return await get_solana_transactions_for_graph_async(address, tier)
+
+async def get_wallet_graph_data(address: str, tier: str = "free"):
+    """
+    Main function to get all graph data for a wallet address with tier-based limits - now fully async
     """
     try:
         limits = get_subscription_limits(tier)
         
-        # Get balance
-        balance = get_solana_balance(address)
+        # Pre-fetch all token prices in parallel to populate cache
+        symbols_to_fetch = ["SOL"] + [token["symbol"] for token in SPL_TOKENS.values()]
         
-        # Get transactions with tier limits
-        transactions = get_solana_transactions_for_graph(address, tier)
+        # Use ThreadPoolExecutor for price fetching (only for sync operations)
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(get_cached_token_price, symbol) for symbol in symbols_to_fetch]
+            # Wait for all price fetches to complete
+            for future in futures:
+                try:
+                    future.result(timeout=5)
+                except Exception as e:
+                    print(f"Price fetch error: {e}")
         
-        # Build nodes and edges for graph
-        nodes = {}
+        # Get balance and transactions concurrently
+        balance_task = get_solana_balance(address)
+        transactions_task = get_solana_transactions_for_graph(address, tier)
+        
+        # Wait for both to complete
+        balance, transactions = await asyncio.gather(balance_task, transactions_task)
+        
+        # Build nodes and edges for graph (optimized)
+        nodes = {
+            address: {
+                "id": address,
+                "label": f"{address[:8]}...{address[-8:]}",
+                "type": "main_wallet",
+                "balance": balance,
+                "full_address": address
+            }
+        }
         edges = []
         
-        # Add the main wallet as a node
-        nodes[address] = {
-            "id": address,
-            "label": f"{address[:8]}...{address[-8:]}",
-            "type": "main_wallet",
-            "balance": balance,
-            "full_address": address
-        }
+        # Process transactions to build graph (optimized with set for node tracking)
+        seen_addresses = {address}
         
-        # Process transactions to build graph
         for tx in transactions:
             source = tx["source"]
             destination = tx["destination"]
             
             # Add source node if not exists
-            if source not in nodes and source != address:
+            if source not in seen_addresses:
                 nodes[source] = {
                     "id": source,
                     "label": f"{source[:8]}...{source[-8:]}" if len(source) > 16 else source,
                     "type": "external_wallet",
                     "full_address": source
                 }
+                seen_addresses.add(source)
             
             # Add destination node if not exists
-            if destination not in nodes and destination != address:
+            if destination not in seen_addresses:
                 nodes[destination] = {
                     "id": destination,
                     "label": f"{destination[:8]}...{destination[-8:]}" if len(destination) > 16 else destination,
                     "type": "external_wallet",
                     "full_address": destination
                 }
+                seen_addresses.add(destination)
             
             # Create edge (represents transaction)
-            edge = {
+            edges.append({
                 "source": source,
                 "destination": destination,
                 "transaction_hash": tx["hash"],
@@ -416,9 +594,7 @@ def get_wallet_graph_data(address: str, tier: str = "free"):
                 "status": tx["status"],
                 "chain": tx["chain"],
                 "weight": tx["amount"]
-            }
-            
-            edges.append(edge)
+            })
         
         # Calculate summary statistics
         sol_transactions = [tx for tx in transactions if tx["token"] == "SOL"]
@@ -435,18 +611,18 @@ def get_wallet_graph_data(address: str, tier: str = "free"):
                 "edges": edges
             },
             "summary": {
-                "total_incoming": len([tx for tx in transactions if tx["direction"] == "incoming"]),
-                "total_outgoing": len([tx for tx in transactions if tx["direction"] == "outgoing"]),
-                "total_solana_volume": sum([tx["amount"] for tx in sol_transactions]),
+                "total_incoming": sum(1 for tx in transactions if tx["direction"] == "incoming"),
+                "total_outgoing": sum(1 for tx in transactions if tx["direction"] == "outgoing"),
+                "total_solana_volume": sum(tx["amount"] for tx in sol_transactions),
                 "unique_addresses": len(nodes) - 1,
                 "date_range": {
-                    "earliest": min([tx["timestamp"] for tx in transactions if tx["timestamp"]]) if transactions else None,
-                    "latest": max([tx["timestamp"] for tx in transactions if tx["timestamp"]]) if transactions else None,
+                    "earliest": min((tx["timestamp"] for tx in transactions if tx["timestamp"]), default=None),
+                    "latest": max((tx["timestamp"] for tx in transactions if tx["timestamp"]), default=None),
                     "allowed_days_back": limits["time_range_days"]
                 },
-                "tokens_found": list(set([tx["token"] for tx in transactions])),
+                "tokens_found": list(set(tx["token"] for tx in transactions)),
                 "limitations_applied": {
-                    "time_limited": len(transactions) > 0,  # Will be true if any filtering occurred
+                    "time_limited": len(transactions) > 0,
                     "transaction_limited": len(transactions) == limits["max_transactions"]
                 }
             }
@@ -465,50 +641,15 @@ def get_wallet_graph_data(address: str, tier: str = "free"):
 
 def get_token_price_usd(symbol: str) -> float:
     """
-    Fetch USD price for a given token symbol using CoinGecko.
-    Uses cache to avoid redundant API calls during the same run.
+    Legacy function kept for compatibility - now uses cached version
     """
-    if symbol in _token_price_cache:
-        return _token_price_cache[symbol]
-
-    try:
-        symbol_map = {
-            "SOL": "solana",
-            "USDC": "usd-coin",
-            "USDT": "tether",
-            "BONK": "bonk",
-            "JUP": "jupiter",
-            "RAY": "raydium",
-            "MNDE": "marinade",
-            "stSOL": "lido-staked-sol",
-            "WSOL": "solana",
-            "PENGU": "pudgy-penguins"
-        }
-
-        coingecko_id = symbol_map.get(symbol)
-        if not coingecko_id:
-            return 0
-
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coingecko_id}&vs_currencies=usd"
-        response = requests.get(url)
-        response.raise_for_status()
-        data = response.json()
-        price = data.get(coingecko_id, {}).get("usd", 0)
-
-        _token_price_cache[symbol] = price
-        return price
-
-    except Exception as e:
-        print(f"Price fetch failed for {symbol}: {e}")
-        return 0
-
+    return get_cached_token_price(symbol)
 
 def get_day_bounds():
     now = datetime.utcnow()
     start = datetime(now.year, now.month, now.day)
     end = start + timedelta(days=1)
     return start, end
-
 
 # Main endpoint function
 async def analyze_solana_wallet_endpoint(request: Request, userId, chain: str, wallet_address: str, tier: str = "free"):
@@ -555,9 +696,6 @@ async def analyze_solana_wallet_endpoint(request: Request, userId, chain: str, w
 
         if wallet_address.lower() not in used_addresses and len(used_addresses) >= pro_daily_limit:
             raise HTTPException(status_code=403, detail="Pro tier daily limit reached.")
-        
-    
-        
 
     # Log query after passing check
     await db["wallet_query_logs"].insert_one(WalletQueryLogs.from_query(
@@ -567,8 +705,8 @@ async def analyze_solana_wallet_endpoint(request: Request, userId, chain: str, w
         chain=chain
     ).dict())
 
-    # Return the graph data
-    response = get_wallet_graph_data(wallet_address, tier)
+    # Return the graph data (now fully async)
+    response = await get_wallet_graph_data(wallet_address, tier)
 
     if tier.lower() == "free":
         response["rate_limit_info"] = {
@@ -586,7 +724,7 @@ async def analyze_solana_wallet_endpoint(request: Request, userId, chain: str, w
 
     return response
 
-def analyze_solana_wallet_endpoint2(wallet_address: str):
+async def analyze_solana_wallet_endpoint2(wallet_address: str):
     if not wallet_address:
         return {"error": "Wallet address is required"}
-    return get_wallet_graph_data(wallet_address)
+    return await get_wallet_graph_data(wallet_address)

@@ -20,3 +20,4 @@ pynacl
 base58
 solana
 stripe
+aiohttp
