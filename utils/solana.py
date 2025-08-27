@@ -360,6 +360,47 @@ def get_token_price_usd_sync(symbol: str) -> float:
         print(f"Price fetch failed for {symbol}: {e}")
         return 0
 
+def prefetch_prices(symbols: list[str]):
+    """
+    Bulk fetch prices for multiple symbols and update cache
+    """
+    symbol_map = {
+        "SOL": "solana",
+        "USDC": "usd-coin", 
+        "USDT": "tether",
+        "BONK": "bonk",
+        "JUP": "jupiter",
+        "RAY": "raydium", 
+        "MNDE": "marinade",
+        "stSOL": "lido-staked-sol",
+        "WSOL": "solana",
+        "PENGU": "pudgy-penguins"
+    }
+
+    coingecko_ids = [symbol_map[s] for s in symbols if s in symbol_map]
+
+    if not coingecko_ids:
+        return
+
+    url = f"https://api.coingecko.com/api/v3/simple/price?ids={','.join(coingecko_ids)}&vs_currencies=usd"
+
+    try:
+        response = requests.get(url, timeout=6)
+        response.raise_for_status()
+        data = response.json()
+
+        now = time.time()
+        for s in symbols:
+            cg_id = symbol_map.get(s)
+            if cg_id and cg_id in data:
+                _token_price_cache[s] = {
+                    'price': data[cg_id]['usd'],
+                    'timestamp': now
+                }
+    except Exception as e:
+        print("Prefetch failed:", e)
+
+
 def parse_transaction_transfers(tx_data, user_address: str):
     """Parse transaction data to extract all transfer information - optimized version"""
     transfers = []
@@ -523,15 +564,12 @@ async def get_wallet_graph_data(address: str, tier: str = "free"):
         # Pre-fetch all token prices in parallel to populate cache
         symbols_to_fetch = ["SOL"] + [token["symbol"] for token in SPL_TOKENS.values()]
         
-        # Use ThreadPoolExecutor for price fetching (only for sync operations)
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(get_cached_token_price, symbol) for symbol in symbols_to_fetch]
-            # Wait for all price fetches to complete
-            for future in futures:
-                try:
-                    future.result(timeout=5)
-                except Exception as e:
-                    print(f"Price fetch error: {e}")
+        with ThreadPoolExecutor(max_workers=1) as executor:  # just 1 job now
+            future = executor.submit(prefetch_prices, symbols_to_fetch)
+            try:
+                future.result(timeout=10)
+            except Exception as e:
+                print(f"Price prefetch error: {e}")
         
         # Get balance and transactions concurrently
         balance_task = get_solana_balance(address)

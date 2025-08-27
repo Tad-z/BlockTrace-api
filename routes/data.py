@@ -67,9 +67,9 @@ async def fetch_wallet_data(
         raise HTTPException(status_code=400, detail="Unsupported chain")
     
 @router.get("/simple")
-def fetch_wallet_data(address: str = Query(...)):
+async def fetch_wallet_data(address: str = Query(...)):
     address = address.strip()
-    data = analyze_solana_wallet_endpoint2(address)
+    data = await analyze_solana_wallet_endpoint2(address)
     return data
 
     
