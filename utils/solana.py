@@ -330,7 +330,7 @@ def get_cached_token_price(symbol: str) -> float:
 
 def get_token_price_usd_sync(symbol: str) -> float:
     """
-    Synchronous version of price fetching for caching
+    Synchronous version of price fetching for caching with default fallback
     """
     try:
         symbol_map = {
@@ -346,19 +346,39 @@ def get_token_price_usd_sync(symbol: str) -> float:
             "PENGU": "pudgy-penguins"
         }
 
+        # fallback prices if 429 or API failure
+        default_prices = {
+            "SOL": 210.0,
+            "USDC": 1.0,
+            "USDT": 1.0,
+            "BONK": 0.00002,
+            "JUP": 0.00109,
+            "RAY": 3.88,
+            "MNDE": 0.126557,
+            "stSOL": 256.38,
+            "WSOL": 210.0,
+            "PENGU": 0.03031116,
+        }
+
         coingecko_id = symbol_map.get(symbol)
         if not coingecko_id:
             return 0
 
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={coingecko_id}&vs_currencies=usd"
         response = requests.get(url, timeout=5)
+
+        if response.status_code == 429:
+            print(f"Rate limit hit for {symbol}, using default price")
+            return default_prices.get(symbol, 0)
+
         response.raise_for_status()
         data = response.json()
-        return data.get(coingecko_id, {}).get("usd", 0)
+        return data.get(coingecko_id, {}).get("usd", default_prices.get(symbol, 0))
 
     except Exception as e:
         print(f"Price fetch failed for {symbol}: {e}")
-        return 0
+        # fall back to default
+        return default_prices.get(symbol, 0)
 
 def prefetch_prices(symbols: list[str]):
     """
