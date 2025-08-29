@@ -352,12 +352,12 @@ def get_token_price_usd_sync(symbol: str) -> float:
             "USDC": 1.0,
             "USDT": 1.0,
             "BONK": 0.00002,
-            "JUP": 0.00109,
-            "RAY": 3.88,
-            "MNDE": 0.126557,
-            "stSOL": 256.38,
-            "WSOL": 210.0,
-            "PENGU": 0.03031116,
+            "JUP": 0.0008986,
+            "RAY": 3.57,
+            "MNDE": 0.126214,
+            "stSOL": 250.56,
+            "WSOL": 206.67,
+            "PENGU": 0.02901802,
         }
 
         coingecko_id = symbol_map.get(symbol)
