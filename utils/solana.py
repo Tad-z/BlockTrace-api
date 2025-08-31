@@ -348,14 +348,14 @@ def get_token_price_usd_sync(symbol: str) -> float:
 
         # fallback prices if 429 or API failure
         default_prices = {
-            "SOL": 210.0,
-            "USDC": 1.0,
+            "SOL": 204.95,
+            "USDC": 0.999814,
             "USDT": 1.0,
-            "BONK": 0.00002,
-            "JUP": 0.0008986,
+            "BONK": 0.00002276,
+            "JUP": 0.00105764,
             "RAY": 3.57,
-            "MNDE": 0.126214,
-            "stSOL": 250.56,
+            "MNDE": 0.131998,
+            "stSOL": 248.29,
             "WSOL": 206.67,
             "PENGU": 0.02901802,
         }
