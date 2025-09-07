@@ -7,6 +7,7 @@ from typing import Optional, Literal
 from datetime import datetime, timedelta
 from routes.wallet import is_valid_solana_address, is_valid_ethereum_address
 from utils.solana import analyze_solana_wallet_endpoint, analyze_solana_wallet_endpoint2
+from utils.eth import analyze_ethereum_wallet_endpoint, analyze_ethereum_wallet_endpoint2
 
 router = APIRouter()
 
@@ -54,7 +55,8 @@ async def fetch_wallet_data(
     if chain == "ethereum":
         if not is_valid_ethereum_address(address):
             raise HTTPException(status_code=400, detail="Invalid Ethereum address")
-        return {"message": "Ethereum support coming soon"}
+        data = await analyze_ethereum_wallet_endpoint(request, userId, chain, address, tier)  # ✅ await
+        return data
 
     elif chain == "solana":
         if not is_valid_solana_address(address):
@@ -66,10 +68,16 @@ async def fetch_wallet_data(
     else:
         raise HTTPException(status_code=400, detail="Unsupported chain")
     
-@router.get("/simple")
+@router.get("/simple/solana")
 async def fetch_wallet_data(address: str = Query(...)):
     address = address.strip()
     data = await analyze_solana_wallet_endpoint2(address)
+    return data
+
+@router.get("/simple/ethereum")
+async def fetch_wallet_data(address: str = Query(...)):
+    address = address.strip()
+    data = await analyze_ethereum_wallet_endpoint2(address)
     return data
 
     
