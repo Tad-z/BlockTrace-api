@@ -21,3 +21,5 @@ base58
 solana
 stripe
 aiohttp
+pandas 
+openpyxl

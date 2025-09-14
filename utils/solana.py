@@ -17,7 +17,7 @@ SUBSCRIPTION_LIMITS = {
         "time_range_days": 7,
         "daily_address_limit": 5,
         "max_transactions": 50,
-        "graph_types": ["force_directed"],
+        # "graph_types": ["force_directed"],
         "graph_depth": 1,
         "export_enabled": False
     },
@@ -25,7 +25,7 @@ SUBSCRIPTION_LIMITS = {
         "time_range_days": 180,  # 6 months
         "daily_address_limit": 50,
         "max_transactions": 500,
-        "graph_types": ["force_directed", "flow", "timeline", "sankey"],
+        # "graph_types": ["force_directed", "flow", "timeline", "sankey"],
         "graph_depth": 3,
         "export_enabled": True
     }
@@ -661,6 +661,7 @@ async def get_wallet_graph_data(address: str, tier: str = "free"):
         response = {
             "wallet_address": address,
             "balance": balance,
+            "chain": "Solana",
             "subscription_tier": tier.lower(),
             "tier_limits": limits,
             "total_transactions": len(transactions),

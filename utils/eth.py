@@ -668,7 +668,7 @@ async def get_eth_transactions_for_graph(address: str, tier: str) -> List[Dict]:
     return await get_eth_transactions_for_graph_async(address, tier)
 
 
-async def get_wallet_graph_data(address: str, tier: str = "free"):
+async def get_wallet_graph_data(address: str, tier: str = "pro"):
     """Main function to get all graph data for a wallet address with tier-based limits - now fully async"""
     try:
         limits = get_subscription_limits(tier)
@@ -765,6 +765,7 @@ async def get_wallet_graph_data(address: str, tier: str = "free"):
         response = {
             "wallet_address": address,
             "balance": balance,
+            "chain": "Ethereum",
             "subscription_tier": tier.lower(),
             "tier_limits": limits,
             "total_transactions": len(transactions),

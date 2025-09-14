@@ -8,6 +8,7 @@ from routes.user import router as user_router
 from routes.wallet import router as wallet_router
 from routes.data import router as data_router
 from routes.stripe import router as stripe_router
+from routes.exports import router as exports_router
 
 # Load environment variables
 load_dotenv()
@@ -52,6 +53,7 @@ app.include_router(user_router, tags=["User"], prefix="/user")
 app.include_router(wallet_router, tags=["Wallet"], prefix="/wallet")
 app.include_router(data_router, tags=["Data"], prefix="/data")
 app.include_router(stripe_router, tags=["Stripe"], prefix="/stripe")
+app.include_router(exports_router, tags=["Exports"], prefix="/export")
 
 if __name__ == "__main__":
     import uvicorn
