@@ -215,7 +215,7 @@ async def subscription_status(current_user=Depends(get_current_user)):
 
 # ---------- Stripe Webhook (single source of truth)
 
-@router.post("/stripe-webhook")
+@router.post("/webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
     sig = request.headers.get("stripe-signature")
