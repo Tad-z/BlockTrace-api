@@ -73,5 +73,6 @@ async def get_current_user(request: Request, authorization: str = Header(...)):
 
     # ✅ Normalize user object
     user["id"] = str(user["_id"])
+    print("user", user)
 
     return user
