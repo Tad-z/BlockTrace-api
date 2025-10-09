@@ -1,4 +1,5 @@
 import os
+import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -95,281 +96,497 @@ class CancelResponse(BaseModel):
 @router.post("/create-checkout-session", response_model=CheckoutResponse)
 async def create_checkout_session(request: Request, current_user=Depends(get_current_user)):
     """
-    Starts Stripe Checkout in subscription mode for Pro plan.
+    Starts Stripe Checkout in subscription mode for the Pro plan.
     Bills immediately and sets up monthly renewals.
     """
-    db = get_db(request.app)
-    if not PRO_PRICE_ID or not SUCCESS_URL or not CANCEL_URL:
-        raise HTTPException(500, "Stripe env vars not configured correctly.")
 
+    # --- Step 1: Verify environment configuration ---
+    missing_env = [k for k, v in {
+        "STRIPE_SECRET_KEY": stripe.api_key,
+        "PRO_PLAN_PRICE_ID": PRO_PRICE_ID,
+        "FRONTEND_SUCCESS_URL": SUCCESS_URL,
+        "FRONTEND_CANCEL_URL": CANCEL_URL
+    }.items() if not v]
+
+    if missing_env:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Missing Stripe environment variables: {', '.join(missing_env)}"
+        )
+
+    db = get_db(request.app)
     user_id = str(current_user["_id"])
 
-    # Create/ensure Stripe customer
-    if not current_user.get("stripe_customer_id"):
-        customer = stripe.Customer.create(
-            email=current_user["email"],
-            metadata={"user_id": user_id},
-            # name=current_user.get("name"),
+    # --- Step 2: Ensure a valid Stripe customer ---
+    try:
+        if not current_user.get("stripe_customer_id"):
+            customer = stripe.Customer.create(
+                email=current_user["email"],
+                metadata={"user_id": user_id},
+                # name=current_user.get("name"),  # Optional
+            )
+            db["users"].update_one(
+                {"_id": ObjectId(user_id)},
+                {"$set": {
+                    "stripe_customer_id": customer.id,
+                    "updated_at": utcnow()
+                }}
+            )
+            customer_id = customer.id
+        else:
+            # ✅ Confirm the customer still exists in Stripe
+            try:
+                stripe.Customer.retrieve(current_user["stripe_customer_id"])
+                customer_id = current_user["stripe_customer_id"]
+            except stripe.error.InvalidRequestError:
+                # Customer might have been deleted on Stripe — recreate
+                customer = stripe.Customer.create(
+                    email=current_user["email"],
+                    metadata={"user_id": user_id},
+                )
+                db["users"].update_one(
+                    {"_id": ObjectId(user_id)},
+                    {"$set": {"stripe_customer_id": customer.id, "updated_at": utcnow()}}
+                )
+                customer_id = customer.id
+    except stripe.error.StripeError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Stripe customer error: {e.user_message or str(e)}"
         )
-        db["users"].update_one(
-            {"_id": ObjectId(user_id)},
-            {"$set": {"stripe_customer_id": customer.id, "updated_at": utcnow()}},
-        )
-        customer_id = customer.id
-    else:
-        customer_id = current_user["stripe_customer_id"]
 
-    # If already pro and active-ish, prevent duplicate checkout
-    if current_user.get("subscription_tier") == "pro":
+    # --- Step 3: Prevent duplicate active subscriptions ---
+    sub_tier = current_user.get("subscription_tier")
+    cancel_at_period_end = current_user.get("subscription_cancel_at_period_end", False)
+
+    if sub_tier == "pro" and not cancel_at_period_end:
         raise HTTPException(400, "User already has an active subscription.")
 
+    # --- Step 4: Create Checkout Session with retry safety ---
     try:
-        session = stripe.checkout.Session.create(
-            mode="subscription",
-            customer=customer_id,
-            allow_promotion_codes=True,
-            payment_method_types=["card"],
-            line_items=[{"price": PRO_PRICE_ID, "quantity": 1}],
-            success_url=SUCCESS_URL,
-            cancel_url=CANCEL_URL,
-            metadata={
-                "user_id": user_id,       # <— helps during webhook reconciliation
-                "plan": "pro",
-            },
-        )
+        for attempt in range(3):  # transient retry for network hiccups
+            try:
+                session = stripe.checkout.Session.create(
+                    mode="subscription",
+                    customer=customer_id,
+                    allow_promotion_codes=True,
+                    payment_method_types=["card"],
+                    line_items=[{"price": PRO_PRICE_ID, "quantity": 1}],
+                    success_url=SUCCESS_URL,
+                    cancel_url=CANCEL_URL,
+                    metadata={
+                        "user_id": user_id,
+                        "plan": "pro",
+                    },
+                )
+                break
+            except stripe.error.APIConnectionError:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(1.5)  # small delay before retry
+
         return {"checkout_url": session.url}
+
     except stripe.error.StripeError as e:
-        raise HTTPException(400, f"Stripe error: {e.user_message or str(e)}")
+        raise HTTPException(
+            status_code=400,
+            detail={"error": e.user_message or str(e), "code": getattr(e, "code", None)}
+        )
+
 
 
 # ---------- Billing Portal (manage payment method, cancel, invoices)
 
 @router.post("/create-billing-portal-session", response_model=PortalResponse)
-async def create_billing_portal_session(current_user=Depends(get_current_user)):
+async def create_billing_portal_session(
+    request: Request,
+    current_user=Depends(get_current_user)
+):
+    """
+    Generates a Stripe Billing Portal session for the user.
+    Allows them to manage payment methods, view invoices, or cancel subscriptions.
+    """
+
+    db = get_db(request.app)
     customer_id = current_user.get("stripe_customer_id")
+
+    # --- Step 1: Validate customer existence ---
     if not customer_id:
-        raise HTTPException(400, "No Stripe customer on file.")
-    try:
-        portal = stripe.billing_portal.Session.create(
-            customer=customer_id,
-            return_url=CANCEL_URL or "https://yourapp.com/dashboard",
+        raise HTTPException(
+            status_code=400,
+            detail="No Stripe customer on file. Please start a subscription first."
         )
-        return {"portal_url": portal.url}
+
+    # --- Step 2: Verify the customer still exists on Stripe ---
+    try:
+        stripe.Customer.retrieve(customer_id)
+    except stripe.error.InvalidRequestError:
+        # If the Stripe customer was deleted, clean up local record
+        db["users"].update_one(
+            {"_id": current_user["_id"]},
+            {"$unset": {"stripe_customer_id": ""}}
+        )
+        raise HTTPException(
+            status_code=404,
+            detail="Stripe customer not found. Please start a new subscription."
+        )
+
+    # --- Step 3: Generate billing portal session ---
+    try:
+        portal_session = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            # Return URL should ideally be a dashboard or account settings page
+            return_url=SUCCESS_URL or CANCEL_URL or "https://yourapp.com/dashboard",
+        )
+
+        return {"portal_url": portal_session.url}
+
     except stripe.error.StripeError as e:
-        raise HTTPException(400, f"Stripe error: {e.user_message or str(e)}")
+        raise HTTPException(
+            status_code=400,
+            detail={"error": e.user_message or str(e), "code": getattr(e, "code", None)}
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error creating billing portal: {str(e)}"
+        )
+
 
 
 # ---------- Cancel at period end
 
 @router.post("/cancel-subscription", response_model=CancelResponse)
 async def cancel_subscription(request: Request, current_user=Depends(get_current_user)):
-    sub_id = current_user.get("stripe_subscription_id")
+    """
+    Schedules cancellation of the user's active subscription at the end of the billing period.
+    The user retains Pro access until the current period ends.
+    """
     db = get_db(request.app)
+    sub_id = current_user.get("stripe_subscription_id")
+
     if not sub_id:
         raise HTTPException(400, "No active subscription to cancel.")
 
     try:
-        sub = stripe.Subscription.modify(sub_id, cancel_at_period_end=True)
-        # Keep tier 'pro' until end of period; record intent
+        # --- 1️⃣ Retrieve first to verify it's still active ---
+        sub = stripe.Subscription.retrieve(sub_id)
+        if sub.status in ("canceled", "incomplete_expired"):
+            raise HTTPException(400, "Subscription is already inactive.")
+
+        # --- 2️⃣ Schedule cancellation at period end ---
+        updated_sub = stripe.Subscription.modify(sub_id, cancel_at_period_end=True)
+
+        # --- 3️⃣ Update DB with cancellation metadata ---
         db["users"].update_one(
             {"_id": ObjectId(str(current_user["_id"]))},
             {"$set": {
                 "subscription_cancel_at_period_end": True,
-                "subscription_status": sub.status,
-                "subscription_current_period_end": ts_to_dt(sub.current_period_end),
+                "subscription_status": updated_sub.status,
+                "subscription_current_period_end": ts_to_dt(updated_sub.current_period_end),
                 "updated_at": utcnow(),
             }},
         )
-        return {"status": "cancel_scheduled", "access_until": sub.current_period_end}
+
+        return {
+            "status": "cancel_scheduled",
+            "access_until": updated_sub.current_period_end,
+            "message": "Your subscription will remain active until the end of the billing period."
+        }
+
+    except stripe.error.InvalidRequestError as e:
+        # Usually happens if the subscription ID is invalid or already canceled
+        raise HTTPException(404, f"Invalid or missing subscription: {e.user_message or str(e)}")
+
+    except stripe.error.APIConnectionError:
+        raise HTTPException(503, "Stripe connection failed, please try again later.")
+
     except stripe.error.StripeError as e:
         raise HTTPException(400, f"Stripe error: {e.user_message or str(e)}")
+
+    except Exception as e:
+        # Catch any unexpected DB or runtime issue
+        raise HTTPException(500, f"Unexpected error: {str(e)}")
+
 
 
 # ---------- Subscription Status (helper)
 
 @router.get("/subscription-status")
 async def subscription_status(current_user=Depends(get_current_user)):
+    """
+    Returns the user's current subscription status.
+    Falls back to database state if Stripe API is unreachable.
+    """
     sub_id = current_user.get("stripe_subscription_id")
+
+    # --- 1️⃣ Handle users without Stripe subscription ---
     if not sub_id:
         return {
             "tier": current_user.get("subscription_tier", "free"),
             "status": current_user.get("subscription_status", "no_subscription"),
+            "cancel_at_period_end": current_user.get("subscription_cancel_at_period_end", False),
+            "source": "db",
         }
+
     try:
+        # --- 2️⃣ Retrieve from Stripe ---
         sub = stripe.Subscription.retrieve(sub_id)
+
         return {
             "tier": tier_from_status(sub.status),
             "status": sub.status,
-            "current_period_start": sub.current_period_start,
-            "current_period_end": sub.current_period_end,
+            "current_period_start": ts_to_dt(sub.current_period_start),
+            "current_period_end": ts_to_dt(sub.current_period_end),
             "cancel_at_period_end": sub.cancel_at_period_end,
+            "source": "stripe",
         }
+
+    except stripe.error.InvalidRequestError as e:
+        # Subscription might have been deleted or invalid
+        return {
+            "tier": current_user.get("subscription_tier", "free"),
+            "status": "invalid_subscription",
+            "error": e.user_message or str(e),
+            "source": "fallback_db",
+        }
+
+    except stripe.error.APIConnectionError:
+        # Network or connection issue to Stripe
+        return {
+            "tier": current_user.get("subscription_tier", "free"),
+            "status": current_user.get("subscription_status", "unknown"),
+            "error": "Unable to reach Stripe servers, showing cached data.",
+            "source": "fallback_db",
+        }
+
     except stripe.error.StripeError as e:
-        # Fallback to DB state if Stripe call fails
+        # Any other Stripe error
         return {
             "tier": current_user.get("subscription_tier", "free"),
             "status": current_user.get("subscription_status", "unknown"),
             "error": e.user_message or str(e),
+            "source": "fallback_db",
         }
+
+    except Exception as e:
+        # Catch-all fallback
+        return {
+            "tier": current_user.get("subscription_tier", "free"),
+            "status": "error",
+            "error": str(e),
+            "source": "fallback_db",
+        }
+
 
 
 # ---------- Stripe Webhook (single source of truth)
 
 @router.post("/webhook")
 async def stripe_webhook(request: Request):
+    """
+    Handles Stripe webhook events.
+    Keeps local subscription state in sync with Stripe.
+    """
     payload = await request.body()
-    sig = request.headers.get("stripe-signature")
+    sig_header = request.headers.get("stripe-signature")
+
+    # --- 1️⃣ Verify event authenticity ---
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, WEBHOOK_SECRET)
+    except ValueError:
+        # Invalid JSON
+        raise HTTPException(status_code=400, detail="Invalid payload.")
+    except stripe.error.SignatureVerificationError:
+        # Invalid Stripe signature
+        raise HTTPException(status_code=400, detail="Invalid Stripe signature.")
+
+    event_type = event["type"]
+    data_object = event["data"]["object"]
 
     try:
-        event = stripe.Webhook.construct_event(payload, sig, WEBHOOK_SECRET)
-    except stripe.error.SignatureVerificationError:
-        raise HTTPException(400, "Invalid Stripe signature")
-    except ValueError:
-        raise HTTPException(400, "Invalid payload")
+        # --- 2️⃣ Checkout completed: first payment success ---
+        if event_type == "checkout.session.completed":
+            session = data_object
+            customer_id = session.get("customer")
+            subscription_id = session.get("subscription")
 
-    et = event["type"]
-    data = event["data"]["object"]
+            if not customer_id:
+                raise ValueError("Missing customer ID in session.")
 
-    # 1) Initial success: Checkout completed → upgrade to PRO
-    if et == "checkout.session.completed":
-        session = data
-        customer_id = session["customer"]
-        subscription_id = session.get("subscription")
+            # Retrieve canonical subscription info
+            if subscription_id:
+                sub = stripe.Subscription.retrieve(subscription_id)
+                set_user_subscription_by_customer_id(
+                    request,
+                    customer_id,
+                    tier=tier_from_status(sub.status),
+                    subscription_id=sub.id,
+                    subscription_status=sub.status,
+                    current_period_start=sub.current_period_start,
+                    current_period_end=sub.current_period_end,
+                    started_at=sub.start_date,
+                    status_change_reason="checkout_completed",
+                    extra_sets={
+                        "stripe_customer_id": customer_id,
+                        "subscription_cancel_at_period_end": sub.cancel_at_period_end,
+                    },
+                )
 
-        # Retrieve subscription to get accurate status & period
-        if subscription_id:
-            sub = stripe.Subscription.retrieve(subscription_id)
+        # --- 3️⃣ Recurring invoice success ---
+        elif event_type == "invoice.payment_succeeded":
+            invoice = data_object
+            customer_id = invoice.get("customer")
+            subscription_id = invoice.get("subscription")
+
+            if not customer_id:
+                raise ValueError("Missing customer ID in invoice.")
+
+            if subscription_id:
+                sub = stripe.Subscription.retrieve(subscription_id)
+                set_user_subscription_by_customer_id(
+                    request,
+                    customer_id,
+                    tier=tier_from_status(sub.status),
+                    subscription_id=sub.id,
+                    subscription_status=sub.status,
+                    current_period_start=sub.current_period_start,
+                    current_period_end=sub.current_period_end,
+                    status_change_reason="invoice_paid",
+                    extra_sets={"last_payment_date": utcnow()},
+                )
+
+        # --- 4️⃣ Payment failed: mark past_due but don't downgrade yet ---
+        elif event_type == "invoice.payment_failed":
+            invoice = data_object
+            customer_id = invoice.get("customer")
+            subscription_id = invoice.get("subscription")
+
+            if subscription_id:
+                sub = stripe.Subscription.retrieve(subscription_id)
+                set_user_subscription_by_customer_id(
+                    request,
+                    customer_id,
+                    tier=tier_from_status(sub.status),  # stays pro during grace
+                    subscription_id=sub.id,
+                    subscription_status=sub.status,
+                    current_period_start=sub.current_period_start,
+                    current_period_end=sub.current_period_end,
+                    status_change_reason="invoice_failed",
+                    extra_sets={"payment_failed_date": utcnow()},
+                )
+
+        # --- 5️⃣ Subscription updated (status or cancel flag changed) ---
+        elif event_type == "customer.subscription.updated":
+            sub = data_object
+            customer_id = sub["customer"]
+            new_tier = tier_from_status(sub["status"])
+
             set_user_subscription_by_customer_id(
+                request,
                 customer_id,
-                tier=tier_from_status(sub.status),
-                subscription_id=sub.id,
-                subscription_status=sub.status,
-                current_period_start=sub.current_period_start,
-                current_period_end=sub.current_period_end,
-                started_at=sub.start_date,
-                status_change_reason="checkout_completed",
+                tier=new_tier,
+                subscription_id=sub["id"] if new_tier == "pro" else None,
+                subscription_status=sub["status"],
+                current_period_start=sub.get("current_period_start"),
+                current_period_end=sub.get("current_period_end"),
+                started_at=sub.get("start_date"),
+                status_change_reason="subscription_updated",
                 extra_sets={
-                    "stripe_customer_id": customer_id,
-                    "subscription_cancel_at_period_end": sub.cancel_at_period_end,
+                    "subscription_cancel_at_period_end": sub.get("cancel_at_period_end", False),
                 },
             )
 
-    # 2) Recurring success: keep PRO, refresh period boundaries
-    elif et == "invoice.payment_succeeded":
-        invoice = data
-        customer_id = invoice["customer"]
-        subscription_id = invoice.get("subscription")
+        # --- 6️⃣ Subscription deleted/canceled ---
+        elif event_type == "customer.subscription.deleted":
+            sub = data_object
+            customer_id = sub["customer"]
 
-        # Refresh from subscription for canonical status/period
-        if subscription_id:
-            sub = stripe.Subscription.retrieve(subscription_id)
             set_user_subscription_by_customer_id(
+                request,
                 customer_id,
-                tier=tier_from_status(sub.status),
-                subscription_id=sub.id,
-                subscription_status=sub.status,
-                current_period_start=sub.current_period_start,
-                current_period_end=sub.current_period_end,
-                status_change_reason="invoice_paid",
-                extra_sets={"last_payment_date": utcnow()},
+                tier="free",
+                subscription_id=None,
+                subscription_status=sub["status"],
+                current_period_start=sub.get("current_period_start"),
+                current_period_end=sub.get("current_period_end"),
+                started_at=sub.get("start_date"),
+                status_change_reason="subscription_deleted",
             )
 
-    # 3) Payment failed: DO NOT downgrade yet (grace period). Mark past_due.
-    elif et == "invoice.payment_failed":
-        invoice = data
-        customer_id = invoice["customer"]
-        subscription_id = invoice.get("subscription")
+        # --- 7️⃣ Ignore unhandled events safely ---
+        else:
+            print(f"Unhandled event type: {event_type}")
 
-        # If subscription exists, mark status but keep tier = pro unless terminal
-        if subscription_id:
-            sub = stripe.Subscription.retrieve(subscription_id)
-            set_user_subscription_by_customer_id(
-                customer_id,
-                tier=tier_from_status(sub.status),  # past_due -> still pro
-                subscription_id=sub.id,
-                subscription_status=sub.status,
-                current_period_start=sub.current_period_start,
-                current_period_end=sub.current_period_end,
-                status_change_reason="invoice_failed",
-                extra_sets={"payment_failed_date": utcnow()},
-            )
+        return {"status": "ok"}
 
-    # 4) Subscription updated (status changes). Downgrade only on terminal.
-    elif et == "customer.subscription.updated":
-        sub = data
-        customer_id = sub["customer"]
-        new_tier = tier_from_status(sub["status"])
+    except stripe.error.StripeError as e:
+        # Stripe API problem, return 200 so Stripe doesn't retry indefinitely
+        print(f"⚠️ Stripe API error on webhook: {str(e)}")
+        return {"status": "stripe_error", "error": e.user_message or str(e)}
 
-        set_user_subscription_by_customer_id(
-            customer_id,
-            tier=new_tier,
-            subscription_id=sub["id"] if new_tier == "pro" else None,
-            subscription_status=sub["status"],
-            current_period_start=sub.get("current_period_start"),
-            current_period_end=sub.get("current_period_end"),
-            started_at=sub.get("start_date"),
-            status_change_reason="subscription_updated",
-            extra_sets={"subscription_cancel_at_period_end": sub.get("cancel_at_period_end", False)},
-        )
+    except Exception as e:
+        # Any other issue — log but still return 200 to avoid webhook storm
+        print(f"⚠️ Webhook processing error: {str(e)}")
+        return {"status": "internal_error", "error": str(e)}
 
-    # 5) Subscription deleted (canceled/expired) → downgrade to FREE
-    elif et == "customer.subscription.deleted":
-        sub = data
-        customer_id = sub["customer"]
-
-        set_user_subscription_by_customer_id(
-            customer_id,
-            tier="free",
-            subscription_id=None,
-            subscription_status=sub["status"],  # should be 'canceled'
-            current_period_start=sub.get("current_period_start"),
-            current_period_end=sub.get("current_period_end"),
-            started_at=sub.get("start_date"),
-            status_change_reason="subscription_deleted",
-        )
-
-    return {"status": "ok"}
 
 # 5️⃣ Get invoice history
 @router.get("/invoice-history")
 def get_invoice_history(current_user=Depends(get_current_user)):
-    """Fetch user's invoice history from Stripe"""
+    """
+    Fetch user's invoice history from Stripe.
+    Returns a list of past invoices and payments for transparency and support.
+    """
+    customer_id = current_user.get("stripe_customer_id")
+    if not customer_id:
+        return {"invoices": [], "total_count": 0, "source": "no_stripe_customer"}
+
     try:
-        customer_id = current_user.get("stripe_customer_id")
-        if not customer_id:
-            return {"invoices": []}
-        
-        # Fetch invoices for this customer
-        invoices = stripe.Invoice.list(
-            customer=customer_id,
-            limit=100  # Adjust limit as needed
-        )
-        
-        # Format invoice data for frontend
+        # --- 1️⃣ Retrieve invoices ---
+        invoices = stripe.Invoice.list(customer=customer_id, limit=100)
+
+        # --- 2️⃣ Format data for frontend ---
         invoice_history = []
-        for invoice in invoices.data:
+        for inv in invoices.auto_paging_iter():
             invoice_history.append({
-                "id": invoice.id,
-                "amount_due": invoice.amount_due / 100,  # Convert cents to dollars
-                "amount_paid": invoice.amount_paid / 100,
-                "currency": invoice.currency.upper(),
-                "status": invoice.status,  # "paid", "open", "void", "uncollectible", "draft"
-                "created": invoice.created,  # Unix timestamp
-                "period_start": invoice.period_start if hasattr(invoice, 'period_start') else None,
-                "period_end": invoice.period_end if hasattr(invoice, 'period_end') else None,
-                "invoice_pdf": invoice.invoice_pdf if hasattr(invoice, 'invoice_pdf') else None,
-                "hosted_invoice_url": invoice.hosted_invoice_url if hasattr(invoice, 'hosted_invoice_url') else None,
-                "number": invoice.number if hasattr(invoice, 'number') else None,
-                "attempted": invoice.attempted if hasattr(invoice, 'attempted') else False,
-                "billing_reason": invoice.billing_reason if hasattr(invoice, 'billing_reason') else None,
+                "id": inv.id,
+                "number": getattr(inv, "number", None),
+                "status": getattr(inv, "status", "unknown"),  # "paid", "open", etc.
+                "currency": inv.currency.upper() if hasattr(inv, "currency") else None,
+                "amount_due": (inv.amount_due or 0) / 100,
+                "amount_paid": (inv.amount_paid or 0) / 100,
+                "amount_remaining": (inv.amount_remaining or 0) / 100,
+                "billing_reason": getattr(inv, "billing_reason", None),
+                "attempted": getattr(inv, "attempted", False),
+                "created": ts_to_dt(inv.created),
+                "period_start": ts_to_dt(getattr(inv, "period_start", None)),
+                "period_end": ts_to_dt(getattr(inv, "period_end", None)),
+                "hosted_invoice_url": getattr(inv, "hosted_invoice_url", None),
+                "invoice_pdf": getattr(inv, "invoice_pdf", None),
+                "subscription": getattr(inv, "subscription", None),
             })
-        
+
+        # --- 3️⃣ Sort by most recent ---
+        invoice_history.sort(key=lambda x: x["created"], reverse=True)
+
         return {
             "invoices": invoice_history,
-            "total_count": len(invoice_history)
+            "total_count": len(invoice_history),
+            "source": "stripe",
         }
-        
-    except stripe.StripeError as e:
-        raise HTTPException(status_code=400, detail=f"Stripe error: {str(e)}")
+
+    except stripe.error.InvalidRequestError as e:
+        # Happens if customer ID invalid or deleted
+        raise HTTPException(status_code=404, detail=f"Invalid Stripe customer: {e.user_message or str(e)}")
+
+    except stripe.error.APIConnectionError:
+        # Stripe connection issue
+        raise HTTPException(status_code=503, detail="Unable to connect to Stripe. Please try again later.")
+
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=400, detail=f"Stripe error: {e.user_message or str(e)}")
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching invoices: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
