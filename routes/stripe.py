@@ -338,7 +338,6 @@ async def subscription_status(current_user=Depends(get_current_user)):
     try:
         # --- 2️⃣ Retrieve from Stripe ---
         sub = stripe.Subscription.retrieve(sub_id)
-        print(sub)
 
         return {
             "tier": tier_from_status(sub.status),
@@ -431,7 +430,6 @@ async def stripe_webhook(request: Request):
             # Retrieve canonical subscription info
             if subscription_id:
                 sub = stripe.Subscription.retrieve(subscription_id)
-                print("sub", sub)
                 set_user_subscription_by_customer_id(
                     request,  # ✅ Added request parameter
                     customer_id,
@@ -459,7 +457,6 @@ async def stripe_webhook(request: Request):
 
             if subscription_id:
                 sub = stripe.Subscription.retrieve(subscription_id)
-                print("sub", sub)
                 set_user_subscription_by_customer_id(
                     request,  # ✅ Added request parameter
                     customer_id,
@@ -480,7 +477,6 @@ async def stripe_webhook(request: Request):
 
             if subscription_id:
                 sub = stripe.Subscription.retrieve(subscription_id)
-                print("sub", sub)
                 set_user_subscription_by_customer_id(
                     request,  # ✅ Added request parameter
                     customer_id,
@@ -498,7 +494,6 @@ async def stripe_webhook(request: Request):
             sub = data_object
             customer_id = sub["customer"]
             new_tier = tier_from_status(sub["status"])
-            print("sub", sub)
 
             set_user_subscription_by_customer_id(
                 request,  # ✅ Added request parameter
@@ -519,7 +514,6 @@ async def stripe_webhook(request: Request):
         elif event_type == "customer.subscription.deleted":
             sub = data_object
             customer_id = sub["customer"]
-            print("sub", sub)
 
             set_user_subscription_by_customer_id(
                 request,  # ✅ Added request parameter
@@ -556,7 +550,6 @@ def get_invoice_history(current_user=Depends(get_current_user)):
     Returns a list of past invoices and payments for transparency and support.
     """
     customer_id = current_user.get("stripe_customer_id")
-    print(customer_id)
     if not customer_id:
         return {"invoices": [], "total_count": 0, "source": "no_stripe_customer"}
 
@@ -587,7 +580,6 @@ def get_invoice_history(current_user=Depends(get_current_user)):
 
         # --- 3️⃣ Sort by most recent ---
         invoice_history.sort(key=lambda x: x["created"], reverse=True)
-        print(len(invoice_history))
         return {
             "invoices": invoice_history,
             "total_count": len(invoice_history),
