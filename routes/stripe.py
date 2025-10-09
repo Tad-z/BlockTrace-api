@@ -61,6 +61,7 @@ def set_user_subscription_by_customer_id(
         update.update(extra_sets)
 
     db = get_db(request.app)
+    print(update)
 
     db["users"].update_one(
         {"stripe_customer_id": customer_id},
@@ -213,6 +214,7 @@ async def create_billing_portal_session(
 
     # --- Step 1: Validate customer existence ---
     if not customer_id:
+        print("No customer id")
         raise HTTPException(
             status_code=400,
             detail="No Stripe customer on file. Please start a subscription first."
@@ -227,6 +229,7 @@ async def create_billing_portal_session(
             {"_id": current_user["_id"]},
             {"$unset": {"stripe_customer_id": ""}}
         )
+        print("Stripe customer not found")
         raise HTTPException(
             status_code=404,
             detail="Stripe customer not found. Please start a new subscription."
@@ -240,6 +243,7 @@ async def create_billing_portal_session(
             return_url=SUCCESS_URL or CANCEL_URL or "https://yourapp.com/dashboard",
         )
 
+        print(portal_session.url)
         return {"portal_url": portal_session.url}
 
     except stripe.StripeError as e:
@@ -323,6 +327,7 @@ async def subscription_status(current_user=Depends(get_current_user)):
 
     # --- 1️⃣ Handle users without Stripe subscription ---
     if not sub_id:
+        print("no sub id")
         return {
             "tier": current_user.get("subscription_tier", "free"),
             "status": current_user.get("subscription_status", "no_subscription"),
@@ -333,6 +338,7 @@ async def subscription_status(current_user=Depends(get_current_user)):
     try:
         # --- 2️⃣ Retrieve from Stripe ---
         sub = stripe.Subscription.retrieve(sub_id)
+        print(sub)
 
         return {
             "tier": tier_from_status(sub.status),
@@ -345,6 +351,7 @@ async def subscription_status(current_user=Depends(get_current_user)):
 
     except stripe.InvalidRequestError as e:
         # Subscription might have been deleted or invalid
+        print("Subscription might have been deleted or invalid")
         return {
             "tier": current_user.get("subscription_tier", "free"),
             "status": "invalid_subscription",
@@ -354,6 +361,7 @@ async def subscription_status(current_user=Depends(get_current_user)):
 
     except stripe.APIConnectionError:
         # Network or connection issue to Stripe
+        print("Network or connection issue to Stripe")
         return {
             "tier": current_user.get("subscription_tier", "free"),
             "status": current_user.get("subscription_status", "unknown"),
@@ -363,6 +371,7 @@ async def subscription_status(current_user=Depends(get_current_user)):
 
     except stripe.StripeError as e:
         # Any other Stripe error
+        print("stripe error")
         return {
             "tier": current_user.get("subscription_tier", "free"),
             "status": current_user.get("subscription_status", "unknown"),
@@ -372,6 +381,7 @@ async def subscription_status(current_user=Depends(get_current_user)):
 
     except Exception as e:
         # Catch-all fallback
+        print("exception error")
         return {
             "tier": current_user.get("subscription_tier", "free"),
             "status": "error",
@@ -415,11 +425,13 @@ async def stripe_webhook(request: Request):
             subscription_id = session.get("subscription")
 
             if not customer_id:
+                print("no customer id")
                 raise ValueError("Missing customer ID in session.")
 
             # Retrieve canonical subscription info
             if subscription_id:
                 sub = stripe.Subscription.retrieve(subscription_id)
+                print("sub", sub)
                 set_user_subscription_by_customer_id(
                     request,  # ✅ Added request parameter
                     customer_id,
@@ -447,6 +459,7 @@ async def stripe_webhook(request: Request):
 
             if subscription_id:
                 sub = stripe.Subscription.retrieve(subscription_id)
+                print("sub", sub)
                 set_user_subscription_by_customer_id(
                     request,  # ✅ Added request parameter
                     customer_id,
@@ -467,6 +480,7 @@ async def stripe_webhook(request: Request):
 
             if subscription_id:
                 sub = stripe.Subscription.retrieve(subscription_id)
+                print("sub", sub)
                 set_user_subscription_by_customer_id(
                     request,  # ✅ Added request parameter
                     customer_id,
@@ -484,6 +498,7 @@ async def stripe_webhook(request: Request):
             sub = data_object
             customer_id = sub["customer"]
             new_tier = tier_from_status(sub["status"])
+            print("sub", sub)
 
             set_user_subscription_by_customer_id(
                 request,  # ✅ Added request parameter
@@ -504,6 +519,7 @@ async def stripe_webhook(request: Request):
         elif event_type == "customer.subscription.deleted":
             sub = data_object
             customer_id = sub["customer"]
+            print("sub", sub)
 
             set_user_subscription_by_customer_id(
                 request,  # ✅ Added request parameter
@@ -540,6 +556,7 @@ def get_invoice_history(current_user=Depends(get_current_user)):
     Returns a list of past invoices and payments for transparency and support.
     """
     customer_id = current_user.get("stripe_customer_id")
+    print(customer_id)
     if not customer_id:
         return {"invoices": [], "total_count": 0, "source": "no_stripe_customer"}
 
@@ -570,7 +587,7 @@ def get_invoice_history(current_user=Depends(get_current_user)):
 
         # --- 3️⃣ Sort by most recent ---
         invoice_history.sort(key=lambda x: x["created"], reverse=True)
-
+        print(len(invoice_history))
         return {
             "invoices": invoice_history,
             "total_count": len(invoice_history),
@@ -579,15 +596,19 @@ def get_invoice_history(current_user=Depends(get_current_user)):
 
     except stripe.InvalidRequestError as e:
         # Happens if customer ID invalid or deleted
+        print("customer ID invalid or deleted")
         raise HTTPException(status_code=404, detail=f"Invalid Stripe customer: {e.user_message or str(e)}")
 
     except stripe.APIConnectionError:
         # Stripe connection issue
+        print("Stripe connection issue")
         raise HTTPException(status_code=503, detail="Unable to connect to Stripe. Please try again later.")
 
     except stripe.StripeError as e:
+        print("stripe error")
         raise HTTPException(status_code=400, detail=f"Stripe error: {e.user_message or str(e)}")
 
     except Exception as e:
+        print("exception error")
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
