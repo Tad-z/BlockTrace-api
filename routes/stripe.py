@@ -138,7 +138,7 @@ async def create_checkout_session(request: Request, current_user=Depends(get_cur
             try:
                 stripe.Customer.retrieve(current_user["stripe_customer_id"])
                 customer_id = current_user["stripe_customer_id"]
-            except stripe.error.InvalidRequestError:
+            except stripe.InvalidRequestError:
                 # Customer might have been deleted on Stripe — recreate
                 customer = stripe.Customer.create(
                     email=current_user["email"],
@@ -149,7 +149,7 @@ async def create_checkout_session(request: Request, current_user=Depends(get_cur
                     {"$set": {"stripe_customer_id": customer.id, "updated_at": utcnow()}}
                 )
                 customer_id = customer.id
-    except stripe.error.StripeError as e:
+    except stripe.StripeError as e:
         raise HTTPException(
             status_code=400,
             detail=f"Stripe customer error: {e.user_message or str(e)}"
@@ -185,9 +185,10 @@ async def create_checkout_session(request: Request, current_user=Depends(get_cur
                     raise
                 await asyncio.sleep(1.5)  # small delay before retry
 
+        print(session.url)
         return {"checkout_url": session.url}
 
-    except stripe.error.StripeError as e:
+    except stripe.StripeError as e:
         raise HTTPException(
             status_code=400,
             detail={"error": e.user_message or str(e), "code": getattr(e, "code", None)}
@@ -241,7 +242,7 @@ async def create_billing_portal_session(
 
         return {"portal_url": portal_session.url}
 
-    except stripe.error.StripeError as e:
+    except stripe.StripeError as e:
         raise HTTPException(
             status_code=400,
             detail={"error": e.user_message or str(e), "code": getattr(e, "code", None)}
@@ -294,14 +295,14 @@ async def cancel_subscription(request: Request, current_user=Depends(get_current
             "message": "Your subscription will remain active until the end of the billing period."
         }
 
-    except stripe.error.InvalidRequestError as e:
+    except stripe.InvalidRequestError as e:
         # Usually happens if the subscription ID is invalid or already canceled
         raise HTTPException(404, f"Invalid or missing subscription: {e.user_message or str(e)}")
 
-    except stripe.error.APIConnectionError:
+    except stripe.APIConnectionError:
         raise HTTPException(503, "Stripe connection failed, please try again later.")
 
-    except stripe.error.StripeError as e:
+    except stripe.StripeError as e:
         raise HTTPException(400, f"Stripe error: {e.user_message or str(e)}")
 
     except Exception as e:
@@ -342,7 +343,7 @@ async def subscription_status(current_user=Depends(get_current_user)):
             "source": "stripe",
         }
 
-    except stripe.error.InvalidRequestError as e:
+    except stripe.InvalidRequestError as e:
         # Subscription might have been deleted or invalid
         return {
             "tier": current_user.get("subscription_tier", "free"),
@@ -351,7 +352,7 @@ async def subscription_status(current_user=Depends(get_current_user)):
             "source": "fallback_db",
         }
 
-    except stripe.error.APIConnectionError:
+    except stripe.APIConnectionError:
         # Network or connection issue to Stripe
         return {
             "tier": current_user.get("subscription_tier", "free"),
@@ -360,7 +361,7 @@ async def subscription_status(current_user=Depends(get_current_user)):
             "source": "fallback_db",
         }
 
-    except stripe.error.StripeError as e:
+    except stripe.StripeError as e:
         # Any other Stripe error
         return {
             "tier": current_user.get("subscription_tier", "free"),
@@ -382,6 +383,8 @@ async def subscription_status(current_user=Depends(get_current_user)):
 
 # ---------- Stripe Webhook (single source of truth)
 
+# ---------- Stripe Webhook (single source of truth)
+
 @router.post("/webhook")
 async def stripe_webhook(request: Request):
     """
@@ -395,14 +398,14 @@ async def stripe_webhook(request: Request):
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, WEBHOOK_SECRET)
     except ValueError:
-        # Invalid JSON
         raise HTTPException(status_code=400, detail="Invalid payload.")
-    except stripe.error.SignatureVerificationError:
-        # Invalid Stripe signature
+    except stripe.SignatureVerificationError:  # ✅ Fixed: removed .error
         raise HTTPException(status_code=400, detail="Invalid Stripe signature.")
 
     event_type = event["type"]
     data_object = event["data"]["object"]
+
+    print(event_type)
 
     try:
         # --- 2️⃣ Checkout completed: first payment success ---
@@ -418,18 +421,18 @@ async def stripe_webhook(request: Request):
             if subscription_id:
                 sub = stripe.Subscription.retrieve(subscription_id)
                 set_user_subscription_by_customer_id(
-                    request,
+                    request,  # ✅ Added request parameter
                     customer_id,
                     tier=tier_from_status(sub.status),
                     subscription_id=sub.id,
                     subscription_status=sub.status,
-                    current_period_start=sub.current_period_start,
-                    current_period_end=sub.current_period_end,
-                    started_at=sub.start_date,
+                    current_period_start=sub.get("current_period_start"),  # ✅ Safe access
+                    current_period_end=sub.get("current_period_end"),      # ✅ Safe access
+                    started_at=sub.get("start_date"),
                     status_change_reason="checkout_completed",
                     extra_sets={
                         "stripe_customer_id": customer_id,
-                        "subscription_cancel_at_period_end": sub.cancel_at_period_end,
+                        "subscription_cancel_at_period_end": sub.get("cancel_at_period_end", False),
                     },
                 )
 
@@ -445,13 +448,13 @@ async def stripe_webhook(request: Request):
             if subscription_id:
                 sub = stripe.Subscription.retrieve(subscription_id)
                 set_user_subscription_by_customer_id(
-                    request,
+                    request,  # ✅ Added request parameter
                     customer_id,
                     tier=tier_from_status(sub.status),
                     subscription_id=sub.id,
                     subscription_status=sub.status,
-                    current_period_start=sub.current_period_start,
-                    current_period_end=sub.current_period_end,
+                    current_period_start=sub.get("current_period_start"),  # ✅ Safe access
+                    current_period_end=sub.get("current_period_end"),      # ✅ Safe access
                     status_change_reason="invoice_paid",
                     extra_sets={"last_payment_date": utcnow()},
                 )
@@ -465,13 +468,13 @@ async def stripe_webhook(request: Request):
             if subscription_id:
                 sub = stripe.Subscription.retrieve(subscription_id)
                 set_user_subscription_by_customer_id(
-                    request,
+                    request,  # ✅ Added request parameter
                     customer_id,
-                    tier=tier_from_status(sub.status),  # stays pro during grace
+                    tier=tier_from_status(sub.status),
                     subscription_id=sub.id,
                     subscription_status=sub.status,
-                    current_period_start=sub.current_period_start,
-                    current_period_end=sub.current_period_end,
+                    current_period_start=sub.get("current_period_start"),  # ✅ Safe access
+                    current_period_end=sub.get("current_period_end"),      # ✅ Safe access
                     status_change_reason="invoice_failed",
                     extra_sets={"payment_failed_date": utcnow()},
                 )
@@ -483,13 +486,13 @@ async def stripe_webhook(request: Request):
             new_tier = tier_from_status(sub["status"])
 
             set_user_subscription_by_customer_id(
-                request,
+                request,  # ✅ Added request parameter
                 customer_id,
                 tier=new_tier,
                 subscription_id=sub["id"] if new_tier == "pro" else None,
                 subscription_status=sub["status"],
-                current_period_start=sub.get("current_period_start"),
-                current_period_end=sub.get("current_period_end"),
+                current_period_start=sub.get("current_period_start"),  # ✅ Safe access
+                current_period_end=sub.get("current_period_end"),      # ✅ Safe access
                 started_at=sub.get("start_date"),
                 status_change_reason="subscription_updated",
                 extra_sets={
@@ -503,13 +506,13 @@ async def stripe_webhook(request: Request):
             customer_id = sub["customer"]
 
             set_user_subscription_by_customer_id(
-                request,
+                request,  # ✅ Added request parameter
                 customer_id,
                 tier="free",
                 subscription_id=None,
                 subscription_status=sub["status"],
-                current_period_start=sub.get("current_period_start"),
-                current_period_end=sub.get("current_period_end"),
+                current_period_start=sub.get("current_period_start"),  # ✅ Safe access
+                current_period_end=sub.get("current_period_end"),      # ✅ Safe access
                 started_at=sub.get("start_date"),
                 status_change_reason="subscription_deleted",
             )
@@ -520,13 +523,11 @@ async def stripe_webhook(request: Request):
 
         return {"status": "ok"}
 
-    except stripe.error.StripeError as e:
-        # Stripe API problem, return 200 so Stripe doesn't retry indefinitely
+    except stripe.StripeError as e:  # ✅ Fixed: removed .error
         print(f"⚠️ Stripe API error on webhook: {str(e)}")
-        return {"status": "stripe_error", "error": e.user_message or str(e)}
+        return {"status": "stripe_error", "error": str(e)}
 
     except Exception as e:
-        # Any other issue — log but still return 200 to avoid webhook storm
         print(f"⚠️ Webhook processing error: {str(e)}")
         return {"status": "internal_error", "error": str(e)}
 
@@ -576,15 +577,15 @@ def get_invoice_history(current_user=Depends(get_current_user)):
             "source": "stripe",
         }
 
-    except stripe.error.InvalidRequestError as e:
+    except stripe.InvalidRequestError as e:
         # Happens if customer ID invalid or deleted
         raise HTTPException(status_code=404, detail=f"Invalid Stripe customer: {e.user_message or str(e)}")
 
-    except stripe.error.APIConnectionError:
+    except stripe.APIConnectionError:
         # Stripe connection issue
         raise HTTPException(status_code=503, detail="Unable to connect to Stripe. Please try again later.")
 
-    except stripe.error.StripeError as e:
+    except stripe.StripeError as e:
         raise HTTPException(status_code=400, detail=f"Stripe error: {e.user_message or str(e)}")
 
     except Exception as e:
