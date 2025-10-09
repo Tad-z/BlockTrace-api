@@ -353,16 +353,15 @@ def get_invoice_history(current_user=Depends(get_current_user)):
                 "amount_due": invoice.amount_due / 100,  # Convert cents to dollars
                 "amount_paid": invoice.amount_paid / 100,
                 "currency": invoice.currency.upper(),
-                "status": invoice.status,  # "paid", "open", "void", "uncollectible"
+                "status": invoice.status,  # "paid", "open", "void", "uncollectible", "draft"
                 "created": invoice.created,  # Unix timestamp
-                "period_start": invoice.period_start,
-                "period_end": invoice.period_end,
-                "invoice_pdf": invoice.invoice_pdf,  # PDF download URL
-                "hosted_invoice_url": invoice.hosted_invoice_url,  # Web view URL
-                "number": invoice.number,  # Invoice number (e.g., "INV-001")
-                "paid": invoice.paid,
-                "attempted": invoice.attempted,
-                "billing_reason": invoice.billing_reason,  # "subscription_cycle", "subscription_create", etc.
+                "period_start": invoice.period_start if hasattr(invoice, 'period_start') else None,
+                "period_end": invoice.period_end if hasattr(invoice, 'period_end') else None,
+                "invoice_pdf": invoice.invoice_pdf if hasattr(invoice, 'invoice_pdf') else None,
+                "hosted_invoice_url": invoice.hosted_invoice_url if hasattr(invoice, 'hosted_invoice_url') else None,
+                "number": invoice.number if hasattr(invoice, 'number') else None,
+                "attempted": invoice.attempted if hasattr(invoice, 'attempted') else False,
+                "billing_reason": invoice.billing_reason if hasattr(invoice, 'billing_reason') else None,
             })
         
         return {
@@ -370,5 +369,7 @@ def get_invoice_history(current_user=Depends(get_current_user)):
             "total_count": len(invoice_history)
         }
         
-    except stripe.error.StripeError as e:
+    except stripe.StripeError as e:
         raise HTTPException(status_code=400, detail=f"Stripe error: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching invoices: {str(e)}")
