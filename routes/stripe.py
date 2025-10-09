@@ -180,7 +180,7 @@ async def create_checkout_session(request: Request, current_user=Depends(get_cur
                     },
                 )
                 break
-            except stripe.error.APIConnectionError:
+            except stripe.APIConnectionError:
                 if attempt == 2:
                     raise
                 await asyncio.sleep(1.5)  # small delay before retry
@@ -221,7 +221,7 @@ async def create_billing_portal_session(
     # --- Step 2: Verify the customer still exists on Stripe ---
     try:
         stripe.Customer.retrieve(customer_id)
-    except stripe.error.InvalidRequestError:
+    except stripe.InvalidRequestError:
         # If the Stripe customer was deleted, clean up local record
         db["users"].update_one(
             {"_id": current_user["_id"]},
