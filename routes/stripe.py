@@ -380,7 +380,7 @@ async def subscription_status(current_user=Depends(get_current_user)):
 
     except Exception as e:
         # Catch-all fallback
-        print("exception error")
+        print(f"exception error: {str(e)}")
         return {
             "tier": current_user.get("subscription_tier", "free"),
             "status": "error",
