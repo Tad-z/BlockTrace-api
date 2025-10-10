@@ -342,11 +342,12 @@ async def subscription_status(current_user=Depends(get_current_user)):
         return {
             "tier": tier_from_status(sub.status),
             "status": sub.status,
-            "current_period_start": ts_to_dt(sub.current_period_start),
-            "current_period_end": ts_to_dt(sub.current_period_end),
-            "cancel_at_period_end": sub.cancel_at_period_end,
+            "current_period_start": ts_to_dt(sub.get("current_period_start")),
+            "current_period_end": ts_to_dt(sub.get("current_period_end")),
+            "cancel_at_period_end": sub.get("cancel_at_period_end", False),
             "source": "stripe",
         }
+
 
     except stripe.InvalidRequestError as e:
         # Subscription might have been deleted or invalid
