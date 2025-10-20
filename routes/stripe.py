@@ -421,6 +421,9 @@ async def stripe_webhook(request: Request):
         # --- 2️⃣ Checkout completed: first payment success ---
         if event_type == "checkout.session.completed":
             session = data_object
+            if session.get("total_details", {}).get("amount_discount"):
+                promo_info = session.get("discounts", [])
+                print("User used promo:", promo_info)
             customer_id = session.get("customer")
             subscription_id = session.get("subscription")
 
