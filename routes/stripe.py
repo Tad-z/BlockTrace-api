@@ -121,6 +121,7 @@ async def create_checkout_session(request: Request, current_user=Depends(get_cur
     # --- Step 2: Ensure a valid Stripe customer ---
     try:
         stripe_customer_id = current_user.get("stripe_customer_id")
+        print("id", stripe_customer_id)
         email = current_user["email"]
 
         if not stripe_customer_id:
@@ -140,6 +141,7 @@ async def create_checkout_session(request: Request, current_user=Depends(get_cur
         else:
             # Validate that customer still exists in Stripe
             try:
+                print("here")
                 stripe.Customer.retrieve(stripe_customer_id)
                 customer_id = stripe_customer_id
             except stripe.InvalidRequestError as e:
