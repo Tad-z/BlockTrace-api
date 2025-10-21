@@ -141,24 +141,24 @@ async def create_checkout_session(request: Request, current_user=Depends(get_cur
         else:
             # Validate that customer still exists in Stripe
             try:
-                print("here")
-                stripe.Customer.retrieve(stripe_customer_id)
-                customer_id = stripe_customer_id
-                print("id2", customer_id)
-            except stripe.InvalidRequestError as e:
-                # If Stripe says the customer doesn't exist, recreate it
-                print(f"⚠️ Stripe customer missing ({stripe_customer_id}), recreating...")
-
+                existing_customer = stripe.Customer.retrieve(current_user["stripe_customer_id"])
+                # Extra safety: Ensure it belongs to the same API key mode
+                if existing_customer and not getattr(existing_customer, "deleted", False):
+                    customer_id = existing_customer.id
+                else:
+                    raise stripe.InvalidRequestError(
+                        message="Customer missing or deleted",
+                        param="customer"
+                    )
+            except stripe.InvalidRequestError:
+                # Customer might belong to another environment or was deleted
                 customer = stripe.Customer.create(
-                    email=email,
+                    email=current_user["email"],
                     metadata={"user_id": user_id},
                 )
                 db["users"].update_one(
                     {"_id": ObjectId(user_id)},
-                    {"$set": {
-                        "stripe_customer_id": customer.id,
-                        "updated_at": utcnow()
-                    }}
+                    {"$set": {"stripe_customer_id": customer.id, "updated_at": utcnow()}}
                 )
                 customer_id = customer.id
 
