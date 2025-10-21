@@ -179,7 +179,7 @@ async def create_checkout_session(request: Request, current_user=Depends(get_cur
 
     # --- Step 4: Create Checkout Session with retry safety ---
     try:
-        print("here")
+        print("here2")
         for attempt in range(3):  # transient retry for network hiccups
             try:
                 session = stripe.checkout.Session.create(
