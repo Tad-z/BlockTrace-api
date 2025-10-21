@@ -201,10 +201,12 @@ async def create_checkout_session(request: Request, current_user=Depends(get_cur
                     raise
                 await asyncio.sleep(1.5)  # small delay before retry
 
+
         print(session.url)
         return {"checkout_url": session.url}
 
     except stripe.StripeError as e:
+        print("StripeError creating checkout:", e)
         raise HTTPException(
             status_code=400,
             detail={"error": e.user_message or str(e), "code": getattr(e, "code", None)}
