@@ -120,11 +120,14 @@ async def create_checkout_session(request: Request, current_user=Depends(get_cur
 
     # --- Step 2: Ensure a valid Stripe customer ---
     try:
-        if not current_user.get("stripe_customer_id"):
+        stripe_customer_id = current_user.get("stripe_customer_id")
+        email = current_user["email"]
+
+        if not stripe_customer_id:
+            # No customer yet — create one
             customer = stripe.Customer.create(
-                email=current_user["email"],
+                email=email,
                 metadata={"user_id": user_id},
-                # name=current_user.get("name"),  # Optional
             )
             db["users"].update_one(
                 {"_id": ObjectId(user_id)},
@@ -135,26 +138,34 @@ async def create_checkout_session(request: Request, current_user=Depends(get_cur
             )
             customer_id = customer.id
         else:
-            # ✅ Confirm the customer still exists in Stripe
+            # Validate that customer still exists in Stripe
             try:
-                stripe.Customer.retrieve(current_user["stripe_customer_id"])
-                customer_id = current_user["stripe_customer_id"]
-            except stripe.InvalidRequestError:
-                # Customer might have been deleted on Stripe — recreate
+                stripe.Customer.retrieve(stripe_customer_id)
+                customer_id = stripe_customer_id
+            except stripe.InvalidRequestError as e:
+                # If Stripe says the customer doesn't exist, recreate it
+                print(f"⚠️ Stripe customer missing ({stripe_customer_id}), recreating...")
+
                 customer = stripe.Customer.create(
-                    email=current_user["email"],
+                    email=email,
                     metadata={"user_id": user_id},
                 )
                 db["users"].update_one(
                     {"_id": ObjectId(user_id)},
-                    {"$set": {"stripe_customer_id": customer.id, "updated_at": utcnow()}}
+                    {"$set": {
+                        "stripe_customer_id": customer.id,
+                        "updated_at": utcnow()
+                    }}
                 )
                 customer_id = customer.id
+
     except stripe.StripeError as e:
+        print(f"❌ Stripe error while ensuring customer: {e}")
         raise HTTPException(
             status_code=400,
             detail=f"Stripe customer error: {e.user_message or str(e)}"
         )
+
 
     # --- Step 3: Prevent duplicate active subscriptions ---
     sub_tier = current_user.get("subscription_tier")
