@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 # User model
 class UserModel(BaseModel):
     id: Optional[str] = Field(None, alias="_id")
+    blocktrace_id: Optional[str] = None
     email: str
     supabase_id: str
     wallet_addresses: list[dict] = Field(default_factory=list)

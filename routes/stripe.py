@@ -437,10 +437,12 @@ async def stripe_webhook(request: Request):
     try:
         # --- 2️⃣ Checkout completed: first payment success ---
         if event_type == "checkout.session.completed":
+            usePromo = False
             session = data_object
             if session.get("total_details", {}).get("amount_discount"):
                 promo_info = session.get("discounts", [])
                 print("User used promo:", promo_info)
+                usePromo = True
             customer_id = session.get("customer")
             subscription_id = session.get("subscription")
 
@@ -464,6 +466,11 @@ async def stripe_webhook(request: Request):
                     extra_sets={
                         "stripe_customer_id": customer_id,
                         "subscription_cancel_at_period_end": sub.get("cancel_at_period_end", False),
+                        "usePromo": {
+                            "used": True,
+                            "promo_info": promo_info,
+                            "used_at": utcnow()
+                        }
                     },
                 )
 

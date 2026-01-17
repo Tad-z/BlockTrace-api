@@ -1,4 +1,6 @@
 # dependencies/auth.py
+import secrets
+import string
 from fastapi import Request, Header, HTTPException
 from db import get_db
 from utils.supabase_auth import verify_supabase_token
@@ -7,6 +9,16 @@ from datetime import datetime, timezone
 def utcnow() -> datetime:
     """Consistent UTC datetime for the app."""
     return datetime.now(timezone.utc)
+
+async def generate_blocktrace_id(db) -> str:
+    """Generate a unique BlockTrace ID in format BT-XXXXXXXX"""
+    chars = string.ascii_uppercase + string.digits
+    while True:
+        random_part = ''.join(secrets.choice(chars) for _ in range(8))
+        blocktrace_id = f"BT-{random_part}"
+        existing = await db["users"].find_one({"blocktrace_id": blocktrace_id})
+        if not existing:
+            return blocktrace_id
 
 async def get_current_user(request: Request, authorization: str = Header(...)):
     if not authorization.startswith("Bearer "):
@@ -28,6 +40,7 @@ async def get_current_user(request: Request, authorization: str = Header(...)):
     if not user:
         now = utcnow()
         user = {
+            "blocktrace_id": await generate_blocktrace_id(db),
             "supabase_id": supabase_id,
             "email": email,
             "wallet_addresses": [],
@@ -65,6 +78,8 @@ async def get_current_user(request: Request, authorization: str = Header(...)):
         })
     if "subscription_tier" not in user:
         migrate_updates["subscription_tier"] = "free"
+    if "blocktrace_id" not in user:
+        migrate_updates["blocktrace_id"] = await generate_blocktrace_id(db)
 
     if migrate_updates:
         migrate_updates["updated_at"] = utcnow()
