@@ -562,18 +562,18 @@ def get_token_price_usd_sync(symbol: str) -> float:
             "BUSD": "binance-usd",
         }
 
-        # Fallback prices if 429 or API failure
+        # Fallback prices if 429 or API failure (updated Jan 2026)
         default_prices = {
-            "ETH": 4300.73,
-            "USDC": 0.999814,
+            "ETH": 2733.87,
+            "USDC": 1.0,
             "USDT": 1.0,
-            "WBTC": 111237,
-            "WETH": 4304.64,
-            "UNI": 9.37,
-            "MATIC":  0.279483,
-            "LINK": 22.26,
+            "WBTC": 82705.00,
+            "WETH": 2734.54,
+            "UNI": 4.27,
+            "MATIC": 0.11097,
+            "LINK": 10.70,
             "DAI": 1.0,
-            "SHIB":  0.00001237,
+            "SHIB": 0.00000729,
             "BUSD": 1.0,
         }
 
@@ -620,18 +620,18 @@ def prefetch_prices(symbols: list[str]):
 
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={','.join(coingecko_ids)}&vs_currencies=usd"
 
-    # Default prices fallback (same as get_token_price)
+    # Default prices fallback (same as get_token_price, updated Jan 2026)
     default_prices = {
-        "ETH": 4300.73,
-        "USDC": 0.999814,
+        "ETH": 2733.87,
+        "USDC": 1.0,
         "USDT": 1.0,
-        "WBTC": 111237,
-        "WETH": 4304.64,
-        "UNI": 9.37,
-        "MATIC": 0.279483,
-        "LINK": 22.26,
+        "WBTC": 82705.00,
+        "WETH": 2734.54,
+        "UNI": 4.27,
+        "MATIC": 0.11097,
+        "LINK": 10.70,
         "DAI": 1.0,
-        "SHIB": 0.00001237,
+        "SHIB": 0.00000729,
         "BUSD": 1.0,
     }
 

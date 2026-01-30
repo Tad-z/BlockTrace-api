@@ -346,18 +346,18 @@ def get_token_price_usd_sync(symbol: str) -> float:
             "PENGU": "pudgy-penguins"
         }
 
-        # fallback prices if 429 or API failure
+        # fallback prices if 429 or API failure (updated Jan 2026)
         default_prices = {
-            "SOL": 204.95,
-            "USDC": 0.999814,
+            "SOL": 116.32,
+            "USDC": 1.0,
             "USDT": 1.0,
-            "BONK": 0.00002276,
-            "JUP": 0.00105764,
-            "RAY": 3.57,
-            "MNDE": 0.131998,
-            "stSOL": 248.29,
-            "WSOL": 206.67,
-            "PENGU": 0.02901802,
+            "BONK": 0.00000803,
+            "JUP": 0.00061695,
+            "RAY": 0.917667,
+            "MNDE": 0.03483336,
+            "stSOL": 145.00,
+            "WSOL": 116.32,
+            "PENGU": 0.00881843,
         }
 
         coingecko_id = symbol_map.get(symbol)
@@ -404,18 +404,18 @@ def prefetch_prices(symbols: list[str]):
 
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={','.join(coingecko_ids)}&vs_currencies=usd"
 
-    # Default prices fallback (same as get_token_price)
+    # Default prices fallback (same as get_token_price, updated Jan 2026)
     default_prices = {
-        "SOL": 204.95,
-        "USDC": 0.999814,
+        "SOL": 116.32,
+        "USDC": 1.0,
         "USDT": 1.0,
-        "BONK": 0.00002276,
-        "JUP": 0.00105764,
-        "RAY": 3.57,
-        "MNDE": 0.131998,
-        "stSOL": 248.29,
-        "WSOL": 206.67,
-        "PENGU": 0.02901802,
+        "BONK": 0.00000803,
+        "JUP": 0.00061695,
+        "RAY": 0.917667,
+        "MNDE": 0.03483336,
+        "stSOL": 145.00,
+        "WSOL": 116.32,
+        "PENGU": 0.00881843,
     }
 
     try:
