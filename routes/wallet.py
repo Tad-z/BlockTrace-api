@@ -66,18 +66,26 @@ async def create_wallet_challenge(
     )
 
     if has_wallet:
+        # Set ALL wallets to not primary first
         await db.users.update_one(
             {"_id": current_user["_id"]},
             {
                 "$set": {
                     "updated_at": datetime.utcnow(),
-                    "wallet_addresses.$[elem].is_primary": False,
-                    "wallet_addresses.$[primaryElem].is_primary": True,
+                    "wallet_addresses.$[].is_primary": False,
+                }
+            },
+        )
+        # Then set the target wallet as primary
+        await db.users.update_one(
+            {"_id": current_user["_id"]},
+            {
+                "$set": {
+                    "wallet_addresses.$[target].is_primary": True,
                 }
             },
             array_filters=[
-                {"elem.address": {"$ne": address}},
-                {"primaryElem.address": address, "primaryElem.chain": chain},
+                {"target.address": address, "target.chain": chain},
             ]
         )
 
@@ -140,14 +148,16 @@ async def verify_wallet_signature(
     chain = body.chain
     email = current_user.get("email")
 
-    # 🔎 Get valid challenge for this wallet
-    challenge_doc = await db.challenges.find_one(
+    # 🔎 Atomically find and mark challenge as used (prevents race condition)
+    challenge_doc = await db.challenges.find_one_and_update(
         {
             "wallet_address": address,
             "chain": chain,
             "used": False,
             "expires_at": {"$gt": datetime.utcnow()},
-        }
+        },
+        {"$set": {"used": True}},
+        return_document=False,  # Return the original document before update
     )
 
     if not challenge_doc:
@@ -166,23 +176,32 @@ async def verify_wallet_signature(
         raise HTTPException(status_code=400, detail="Unsupported chain")
 
     if not valid:
+        # Restore challenge if signature invalid (allow retry)
+        await db.challenges.update_one(
+            {"_id": challenge_doc["_id"]}, {"$set": {"used": False}}
+        )
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-    # ✅ Mark challenge as used
-    await db.challenges.update_one(
-        {"_id": challenge_doc["_id"]}, {"$set": {"used": True}}
+    # ✅ Check if wallet already exists for this user
+    existing_wallet = await db.users.find_one(
+        {
+            "_id": current_user["_id"],
+            "wallet_addresses": {"$elemMatch": {"address": address, "chain": chain}},
+        }
     )
 
-    # ❌ Set all other wallets as not primary
+    if existing_wallet:
+        raise HTTPException(status_code=400, detail="Wallet already linked to your account")
+
+    # ✅ Set ALL existing wallets as not primary, then add new wallet as primary (atomic)
     await db.users.update_one(
         {"_id": current_user["_id"]},
         {
-            "$set": {"updated_at": datetime.utcnow()},
-            "$set": {"wallet_addresses.$[elem].is_primary": False},
+            "$set": {
+                "updated_at": datetime.utcnow(),
+                "wallet_addresses.$[].is_primary": False,
+            }
         },
-        array_filters=[
-            {"elem.address": {"$ne": address}, "elem.chain": {"$ne": chain}}
-        ],
     )
 
     # ✅ Add new wallet as primary

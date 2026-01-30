@@ -620,8 +620,33 @@ def prefetch_prices(symbols: list[str]):
 
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={','.join(coingecko_ids)}&vs_currencies=usd"
 
+    # Default prices fallback (same as get_token_price)
+    default_prices = {
+        "ETH": 4300.73,
+        "USDC": 0.999814,
+        "USDT": 1.0,
+        "WBTC": 111237,
+        "WETH": 4304.64,
+        "UNI": 9.37,
+        "MATIC": 0.279483,
+        "LINK": 22.26,
+        "DAI": 1.0,
+        "SHIB": 0.00001237,
+        "BUSD": 1.0,
+    }
+
     try:
         response = requests.get(url, timeout=6)
+
+        # Handle rate limiting gracefully
+        if response.status_code == 429:
+            print("CoinGecko rate limit hit, using default prices for prefetch")
+            now = time.time()
+            for s in symbols:
+                if s in default_prices:
+                    _token_price_cache[s] = {"price": default_prices[s], "timestamp": now}
+            return
+
         response.raise_for_status()
         data = response.json()
 

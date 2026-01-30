@@ -33,7 +33,7 @@ def ts_to_dt(ts: Optional[int]) -> Optional[datetime]:
         return None
     return datetime.fromtimestamp(ts, tz=timezone.utc)
 
-def set_user_subscription_by_customer_id(
+async def set_user_subscription_by_customer_id(
     request: Request,
     customer_id: str,
     *,
@@ -63,7 +63,7 @@ def set_user_subscription_by_customer_id(
     db = get_db(request.app)
     print(update)
 
-    db["users"].update_one(
+    await db["users"].update_one(
         {"stripe_customer_id": customer_id},
         {"$set": update},
         upsert=False,  # we expect user to already exist
@@ -453,14 +453,14 @@ async def stripe_webhook(request: Request):
             # Retrieve canonical subscription info
             if subscription_id:
                 sub = stripe.Subscription.retrieve(subscription_id)
-                set_user_subscription_by_customer_id(
-                    request,  # ✅ Added request parameter
+                await set_user_subscription_by_customer_id(
+                    request,
                     customer_id,
                     tier=tier_from_status(sub.status),
                     subscription_id=sub.id,
                     subscription_status=sub.status,
-                    current_period_start=sub.get("current_period_start"),  # ✅ Safe access
-                    current_period_end=sub.get("current_period_end"),      # ✅ Safe access
+                    current_period_start=sub.get("current_period_start"),
+                    current_period_end=sub.get("current_period_end"),
                     started_at=sub.get("start_date"),
                     status_change_reason="checkout_completed",
                     extra_sets={
@@ -485,14 +485,14 @@ async def stripe_webhook(request: Request):
 
             if subscription_id:
                 sub = stripe.Subscription.retrieve(subscription_id)
-                set_user_subscription_by_customer_id(
-                    request,  # ✅ Added request parameter
+                await set_user_subscription_by_customer_id(
+                    request,
                     customer_id,
                     tier=tier_from_status(sub.status),
                     subscription_id=sub.id,
                     subscription_status=sub.status,
-                    current_period_start=sub.get("current_period_start"),  # ✅ Safe access
-                    current_period_end=sub.get("current_period_end"),      # ✅ Safe access
+                    current_period_start=sub.get("current_period_start"),
+                    current_period_end=sub.get("current_period_end"),
                     status_change_reason="invoice_paid",
                     extra_sets={"last_payment_date": utcnow()},
                 )
@@ -505,14 +505,14 @@ async def stripe_webhook(request: Request):
 
             if subscription_id:
                 sub = stripe.Subscription.retrieve(subscription_id)
-                set_user_subscription_by_customer_id(
-                    request,  # ✅ Added request parameter
+                await set_user_subscription_by_customer_id(
+                    request,
                     customer_id,
                     tier=tier_from_status(sub.status),
                     subscription_id=sub.id,
                     subscription_status=sub.status,
-                    current_period_start=sub.get("current_period_start"),  # ✅ Safe access
-                    current_period_end=sub.get("current_period_end"),      # ✅ Safe access
+                    current_period_start=sub.get("current_period_start"),
+                    current_period_end=sub.get("current_period_end"),
                     status_change_reason="invoice_failed",
                     extra_sets={"payment_failed_date": utcnow()},
                 )
@@ -523,14 +523,14 @@ async def stripe_webhook(request: Request):
             customer_id = sub["customer"]
             new_tier = tier_from_status(sub["status"])
 
-            set_user_subscription_by_customer_id(
-                request,  # ✅ Added request parameter
+            await set_user_subscription_by_customer_id(
+                request,
                 customer_id,
                 tier=new_tier,
                 subscription_id=sub["id"] if new_tier == "pro" else None,
                 subscription_status=sub["status"],
-                current_period_start=sub.get("current_period_start"),  # ✅ Safe access
-                current_period_end=sub.get("current_period_end"),      # ✅ Safe access
+                current_period_start=sub.get("current_period_start"),
+                current_period_end=sub.get("current_period_end"),
                 started_at=sub.get("start_date"),
                 status_change_reason="subscription_updated",
                 extra_sets={
@@ -543,14 +543,14 @@ async def stripe_webhook(request: Request):
             sub = data_object
             customer_id = sub["customer"]
 
-            set_user_subscription_by_customer_id(
-                request,  # ✅ Added request parameter
+            await set_user_subscription_by_customer_id(
+                request,
                 customer_id,
                 tier="free",
                 subscription_id=None,
                 subscription_status=sub["status"],
-                current_period_start=sub.get("current_period_start"),  # ✅ Safe access
-                current_period_end=sub.get("current_period_end"),      # ✅ Safe access
+                current_period_start=sub.get("current_period_start"),
+                current_period_end=sub.get("current_period_end"),
                 started_at=sub.get("start_date"),
                 status_change_reason="subscription_deleted",
             )

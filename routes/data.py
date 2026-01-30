@@ -78,7 +78,7 @@ async def fetch_wallet_data(
             raise HTTPException(status_code=400, detail="Unsupported chain")
 
         # ✅ Cache result for future requests
-        ttl = 60 if tier == "premium" else 180  
+        ttl = 60 if tier == "pro" else 180  
         await redis_client.set(cache_key, json.dumps(data), ex=ttl)
 
         print("⚙️ Cached wallet data for:", cache_key)
@@ -88,7 +88,7 @@ async def fetch_wallet_data(
         raise HTTPException(status_code=500, detail=str(e))
     
 @router.get("/simple/solana")
-async def fetch_wallet_data(address: str = Query(...)):
+async def fetch_solana_wallet_simple(address: str = Query(...)):
     address = address.strip()
     cache_key = f"wallet_cache:{address}"
     cached_data = await redis_client.get(cache_key)
@@ -101,7 +101,7 @@ async def fetch_wallet_data(address: str = Query(...)):
     return data
 
 @router.get("/simple/ethereum")
-async def fetch_wallet_data(address: str = Query(...)):
+async def fetch_ethereum_wallet_simple(address: str = Query(...)):
     address = address.strip()
     cache_key = f"wallet_cache:{address}"
     cached_data = await redis_client.get(cache_key)
