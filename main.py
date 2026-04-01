@@ -9,6 +9,7 @@ from routes.wallet import router as wallet_router
 from routes.data import router as data_router
 from routes.stripe import router as stripe_router
 from routes.exports import router as exports_router
+from utils.redis_client import redis_client
 
 # Load environment variables
 load_dotenv()
@@ -43,6 +44,8 @@ async def shutdown_event():
     if app.state.client:
         app.state.client.close()
         print("MongoDB connection closed!")
+    await redis_client.aclose()
+    print("Redis connection closed!")
 
 @app.get("/health")
 async def root():

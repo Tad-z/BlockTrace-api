@@ -10,10 +10,13 @@ REDIS_PORT = int(os.getenv("REDIS_PORT"))
 REDIS_USERNAME = os.getenv("REDIS_USERNAME")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 
-redis_client = redis.Redis(
+redis_pool = redis.ConnectionPool(
     host=REDIS_HOST,
     port=REDIS_PORT,
     username=REDIS_USERNAME,
     password=REDIS_PASSWORD,
-    decode_responses=True
+    decode_responses=True,
+    max_connections=10,
 )
+
+redis_client = redis.Redis(connection_pool=redis_pool)
